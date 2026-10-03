@@ -192,7 +192,7 @@ fn handle(nr: u64, f: *Frame) isize {
         293 => sysPipe2(a0, a1),
         302 => sysPrlimit(a0, a1, a2, a3),
         318 => sysGetrandom(a0, a1),
-        332 => -E.ENOSYS, // statx -> libc falls back
+        332 => sysStatx(a0, a1, a2, a4),
         334 => -E.ENOSYS, // rseq
         435 => -E.ENOSYS, // clone3 -> libc falls back to clone
         else => blk: {
@@ -428,6 +428,37 @@ fn sysStatat(dirfd: u64, path_addr: u64, st: u64, flags: u64) isize {
     const start = startDir(dirfd, path) catch |e| return err(e);
     const n = vfs.resolve(start, path, flags & AT_SYMLINK_NOFOLLOW == 0) catch |e| return err(e);
     return sysFstatNode(n, st);
+}
+
+fn sysStatx(dirfd: u64, path_addr: u64, flags: u64, buf: u64) isize {
+    var pb: [4096]u8 = undefined;
+    const path = readPath(path_addr, &pb) catch |e| return err(e);
+    var n: *vfs.Node = undefined;
+    var pipe = false;
+    if (path.len == 0 and flags & AT_EMPTY_PATH != 0) {
+        if (dirfd == AT_FDCWD) n = proc.current().cwd else {
+            const f = getFile(dirfd) orelse return -E.EBADF;
+            if (f.node) |x| n = x else pipe = true;
+        }
+    } else {
+        const start = startDir(dirfd, path) catch |e| return err(e);
+        n = vfs.resolve(start, path, flags & AT_SYMLINK_NOFOLLOW == 0) catch |e| return err(e);
+    }
+    const st = if (pipe) pipeStat() else fillStat(n);
+    var b = [_]u8{0} ** 256;
+    std.mem.writeInt(u32, b[0..4], 0x7ff, .little);
+    std.mem.writeInt(u32, b[4..8], 4096, .little);
+    std.mem.writeInt(u32, b[16..20], @intCast(st.nlink), .little);
+    std.mem.writeInt(u16, b[28..30], @truncate(st.mode), .little);
+    std.mem.writeInt(u64, b[32..40], st.ino, .little);
+    std.mem.writeInt(u64, b[40..48], @intCast(st.size), .little);
+    std.mem.writeInt(u64, b[48..56], @intCast(st.blocks), .little);
+    inline for (.{ 64, 80, 96, 112 }) |off| std.mem.writeInt(i64, b[off .. off + 8], st.mtime, .little);
+    std.mem.writeInt(u32, b[128..132], @intCast(st.rdev >> 8), .little);
+    std.mem.writeInt(u32, b[132..136], @intCast(st.rdev & 0xff), .little);
+    std.mem.writeInt(u32, b[140..144], 1, .little);
+    proc.copyToUser(buf, &b) catch return -E.EFAULT;
+    return 0;
 }
 
 fn sysFstatNode(n: *vfs.Node, st: u64) isize {
@@ -1243,17 +1274,19 @@ fn sysNanosleep(req: u64, rem: u64) isize {
     const ts = proc.readUser([2]i64, req) catch return -E.EFAULT;
     if (ts[0] < 0 or ts[1] < 0 or ts[1] >= 1_000_000_000) return -E.EINVAL;
     const ns: u64 = @as(u64, @intCast(ts[0])) * 1_000_000_000 + @as(u64, @intCast(ts[1]));
-    const ticks = (ns * time.HZ + 999_999_999) / 1_000_000_000;
-    const end = time.now() + ticks;
-    while (time.now() < end) {
+    const end_ns = time.nanos() + ns;
+    while (time.nanos() < end_ns) {
         if (signal.hasPending()) {
             if (rem != 0) {
-                const left = (end - time.now()) * (1_000_000_000 / time.HZ);
+                const left = end_ns -| time.nanos();
                 proc.writeUser([2]i64, rem, .{ @intCast(left / 1_000_000_000), @intCast(left % 1_000_000_000) }) catch {};
             }
             return -E.EINTR;
         }
-        sched.sleepTicks(end - time.now());
+        const left = end_ns -| time.nanos();
+        if (left < 1_000_000_000 / time.HZ) {
+            sched.yield();
+        } else sched.sleepTicks(left * time.HZ / 1_000_000_000);
     }
     return 0;
 }

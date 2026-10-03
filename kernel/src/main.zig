@@ -56,7 +56,7 @@ fn sleeperThread(_: u64) callconv(.c) void {
     _ = @atomicRmw(u32, &demo_done, .Add, 1, .release);
 }
 
-const init_candidates = [_][]const u8{ "/sbin/init", "/bin/bash", "/bin/sh", "/bin/hello" };
+const init_candidates = [_][]const u8{ "/sbin/init", "/bin/bash", "/bin/ktest", "/bin/hello" };
 
 fn startInit() void {
     const p = proc.newProcess() catch @panic("init: oom");

@@ -1,1 +1,6 @@
-Welcome to yos
+
+  __  __ ____   ___
+  \ \/ // __ \ / __|   yos - a hobby OS in Zig
+   \  /| |  | |\__ \   Limine + uACPI, Linux syscall ABI
+   /_/  \____/ |___/
+
