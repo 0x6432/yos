@@ -3,6 +3,9 @@ const limine = @import("limine.zig");
 const cpu = @import("arch/cpu.zig");
 const serial = @import("serial.zig");
 const log = @import("log.zig");
+const gdt = @import("arch/gdt.zig");
+const idt = @import("arch/idt.zig");
+const pmm = @import("mm/pmm.zig");
 
 comptime {
     _ = limine;
@@ -35,6 +38,21 @@ export fn kmain() callconv(.c) noreturn {
         if (e.kind == .usable) total += e.length;
     }
     log.info("usable memory: {d} MiB in {d} entries", .{ total >> 20, mm.entry_count });
-    log.info("M0 ok", .{});
+    gdt.init();
+    idt.init();
+    log.info("gdt/tss/idt loaded", .{});
+    pmm.init();
+    pmm.selfTest();
+    // exception path sanity check
+    idt.register(3, struct {
+        fn h(f: *idt.TrapFrame) void {
+            log.info("breakpoint trap at rip=0x{x} handled", .{f.rip});
+        }
+    }.h);
+    asm volatile ("int3");
+    log.info("M1 ok", .{});
     cpu.halt();
 }
+
+// Placeholder until the scheduler lands (M4).
+export fn sched_thread_start() callconv(.c) void {}
