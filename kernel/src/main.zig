@@ -6,6 +6,8 @@ const log = @import("log.zig");
 const gdt = @import("arch/gdt.zig");
 const idt = @import("arch/idt.zig");
 const pmm = @import("mm/pmm.zig");
+const vmm = @import("mm/vmm.zig");
+const heap = @import("mm/heap.zig");
 
 comptime {
     _ = limine;
@@ -50,7 +52,23 @@ export fn kmain() callconv(.c) noreturn {
         }
     }.h);
     asm volatile ("int3");
-    log.info("M1 ok", .{});
+    vmm.init();
+    heap.selfTest();
+    {
+        // map a fresh page at a user address in a new address space and read it back
+        const as = vmm.AddressSpace.createUser() catch @panic("as");
+        const pg = pmm.allocPage().?;
+        pmm.ptr(*u64, pg).* = 0xdeadbeefcafe;
+        as.map(0x400000, pg, vmm.W | vmm.U) catch @panic("map");
+        if (as.translate(0x400123) != pg + 0x123) @panic("vmm translate");
+        const clone = as.cloneUser() catch @panic("clone");
+        const cp = clone.translate(0x400000).?;
+        if (cp == pg or pmm.ptr(*u64, cp).* != 0xdeadbeefcafe) @panic("vmm clone");
+        clone.destroy();
+        as.destroy();
+        log.info("vmm: address space create/map/clone/destroy ok", .{});
+    }
+    log.info("M2 ok", .{});
     cpu.halt();
 }
 
