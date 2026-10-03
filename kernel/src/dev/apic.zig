@@ -64,7 +64,7 @@ pub fn initLapic(phys: u64) void {
 pub var timer_handler: ?*const fn (*idt.TrapFrame) void = null;
 
 fn timerIrq(f: *idt.TrapFrame) void {
-    time.ticks += 1;
+    _ = @atomicRmw(u64, &time.ticks, .Add, 1, .monotonic);
     eoi();
     if (timer_handler) |h| h(f);
 }

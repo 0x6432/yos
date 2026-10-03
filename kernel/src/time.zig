@@ -36,6 +36,10 @@ pub fn init() void {
     log.info("time: TSC ~{d} MHz, boot epoch {d}", .{ tsc_per_us, boot_epoch });
 }
 
+pub inline fn now() u64 {
+    return @atomicLoad(u64, &ticks, .monotonic);
+}
+
 pub fn nanos() u64 {
     return (cpu.rdtsc() - tsc_boot) * 1000 / tsc_per_us;
 }

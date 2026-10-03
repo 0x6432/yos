@@ -1361,6 +1361,7 @@ kthread_trampoline:
     call sched_thread_start
     movq %r13, %rdi
     call *%r12
+    call sched_kthread_exit
     ud2
 
 /* first switch into a thread that returns to user mode: rsp -> TrapFrame */

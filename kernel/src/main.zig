@@ -11,6 +11,7 @@ const heap = @import("mm/heap.zig");
 const time = @import("time.zig");
 const acpi = @import("acpi.zig");
 const apic = @import("dev/apic.zig");
+const sched = @import("sched.zig");
 
 comptime {
     _ = limine;
@@ -29,6 +30,24 @@ fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
         log.print("    #{d}: 0x{x}\n", .{ n, ra });
     }
     cpu.halt();
+}
+
+var counters = [_]u64{ 0, 0, 0 };
+var demo_done: u32 = 0;
+fn spinThread(arg: u64) callconv(.c) void {
+    const start = time.now();
+    while (time.now() < start + 30) {
+        counters[arg] += 1;
+    }
+    log.info("sched: spin thread {d} finished after {d} iterations", .{ arg, counters[arg] });
+    _ = @atomicRmw(u32, &demo_done, .Add, 1, .release);
+}
+fn sleeperThread(_: u64) callconv(.c) void {
+    for (0..3) |i| {
+        sched.sleepMs(50);
+        log.info("sched: sleeper woke ({d}) at tick {d}", .{ i, time.now() });
+    }
+    _ = @atomicRmw(u32, &demo_done, .Add, 1, .release);
 }
 
 export fn kmain() callconv(.c) noreturn {
@@ -76,12 +95,20 @@ export fn kmain() callconv(.c) noreturn {
     apic.startTimer();
     cpu.sti();
     acpi.initNamespace();
-    const t0 = time.ticks;
-    while (time.ticks < t0 + 10) cpu.hlt();
+    const t0 = time.now();
+    while (time.now() < t0 + 10) cpu.hlt();
     log.info("timer: got 10 ticks", .{});
-    log.info("M3 ok", .{});
+    sched.init();
+    acpi.yield_hook = sched.yield;
+    acpi.sleep_hook = sched.sleepMs;
+    // round-robin demo: three busy threads that never yield + a sleeper
+    for (0..3) |i| {
+        const t = sched.spawnKernel("spin", spinThread, i) catch @panic("spawn");
+        t.preemptible = true;
+    }
+    _ = sched.spawnKernel("sleeper", sleeperThread, 0) catch @panic("spawn");
+    while (@atomicLoad(u32, &demo_done, .acquire) < 4) sched.sleepMs(20);
+    log.info("sched: counters {d} {d} {d} (all progressed under preemption)", .{ counters[0], counters[1], counters[2] });
+    log.info("M4 ok", .{});
     cpu.halt();
 }
-
-// Placeholder until the scheduler lands (M4).
-export fn sched_thread_start() callconv(.c) void {}
