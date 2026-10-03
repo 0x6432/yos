@@ -32,7 +32,26 @@ pub fn build(b: *std.Build) void {
     kernel.setLinkerScript(b.path("kernel/linker.ld"));
     kernel.addAssemblyFile(b.path("kernel/src/arch/entry.S"));
 
-    // @@UACPI@@
+    // uACPI
+    kernel.addIncludePath(b.path("third_party/uacpi/include"));
+    kernel.addCSourceFiles(.{
+        .root = b.path("third_party/uacpi/source"),
+        .files = &.{
+            "default_handlers.c", "event.c",    "interpreter.c", "io.c",
+            "mutex.c",            "namespace.c", "notify.c",     "opcodes.c",
+            "opregion.c",         "osi.c",       "registers.c",  "resources.c",
+            "shareable.c",        "sleep.c",     "stdlib.c",     "tables.c",
+            "types.c",            "uacpi.c",     "utilities.c",
+        },
+        .flags = &.{
+            "-ffreestanding",
+            "-fno-stack-protector",
+            "-fno-sanitize=undefined",
+            "-mno-red-zone",
+            "-DUACPI_SIZED_FREES",
+            "-DUACPI_USE_BUILTIN_STRING",
+        },
+    });
 
     b.installArtifact(kernel);
 }

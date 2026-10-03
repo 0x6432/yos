@@ -8,6 +8,9 @@ const idt = @import("arch/idt.zig");
 const pmm = @import("mm/pmm.zig");
 const vmm = @import("mm/vmm.zig");
 const heap = @import("mm/heap.zig");
+const time = @import("time.zig");
+const acpi = @import("acpi.zig");
+const apic = @import("dev/apic.zig");
 
 comptime {
     _ = limine;
@@ -68,7 +71,15 @@ export fn kmain() callconv(.c) noreturn {
         as.destroy();
         log.info("vmm: address space create/map/clone/destroy ok", .{});
     }
-    log.info("M2 ok", .{});
+    time.init();
+    acpi.initTables();
+    apic.startTimer();
+    cpu.sti();
+    acpi.initNamespace();
+    const t0 = time.ticks;
+    while (time.ticks < t0 + 10) cpu.hlt();
+    log.info("timer: got 10 ticks", .{});
+    log.info("M3 ok", .{});
     cpu.halt();
 }
 

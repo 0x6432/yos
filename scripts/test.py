@@ -7,7 +7,7 @@ ISO = os.environ.get("ISO", "build/yos.iso")
 
 # (expect, send) steps. `send` may be None.
 STEPS = [
-    ("M2 ok", None),
+    ("M3 ok", None),
 ]
 
 def main():
