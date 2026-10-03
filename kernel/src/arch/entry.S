@@ -1373,6 +1373,43 @@ uthread_trampoline:
     movq %rbx, %rsp
     jmp isr_return
 
+
+/* Linux-style `syscall` entry. Builds a TrapFrame identical to the interrupt
+ * path (vector 0x80) and always returns through iretq. */
+.global syscall_entry
+syscall_entry:
+    swapgs
+    movq %rsp, %gs:16
+    movq %gs:8, %rsp
+    pushq $0x1b
+    pushq %gs:16
+    pushq %r11
+    pushq $0x23
+    pushq %rcx
+    pushq $0
+    pushq $0x80
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rsp, %rdi
+    cld
+    sti
+    call syscall_dispatch
+    cli
+    jmp isr_return
+
 .section .rodata
 .global isr_table
 isr_table:

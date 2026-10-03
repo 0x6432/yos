@@ -12,6 +12,12 @@ const time = @import("time.zig");
 const acpi = @import("acpi.zig");
 const apic = @import("dev/apic.zig");
 const sched = @import("sched.zig");
+const proc = @import("proc.zig");
+const vfs = @import("vfs.zig");
+const signal = @import("signal.zig");
+const syscall = @import("syscall.zig");
+const initrd = @import("initrd.zig");
+const tty = @import("dev/tty.zig");
 
 comptime {
     _ = limine;
@@ -36,7 +42,7 @@ var counters = [_]u64{ 0, 0, 0 };
 var demo_done: u32 = 0;
 fn spinThread(arg: u64) callconv(.c) void {
     const start = time.now();
-    while (time.now() < start + 30) {
+    while (time.now() < start + 20) {
         counters[arg] += 1;
     }
     log.info("sched: spin thread {d} finished after {d} iterations", .{ arg, counters[arg] });
@@ -48,6 +54,33 @@ fn sleeperThread(_: u64) callconv(.c) void {
         log.info("sched: sleeper woke ({d}) at tick {d}", .{ i, time.now() });
     }
     _ = @atomicRmw(u32, &demo_done, .Add, 1, .release);
+}
+
+const init_candidates = [_][]const u8{ "/sbin/init", "/bin/bash", "/bin/sh", "/bin/hello" };
+
+fn startInit() void {
+    const p = proc.newProcess() catch @panic("init: oom");
+    p.pgid = 1;
+    p.sid = 1;
+    p.cwd = vfs.resolve(vfs.root, "/root", true) catch vfs.root;
+    const t = sched.spawnUser("init", std.mem.zeroes(idt.TrapFrame), p.space, p) catch @panic("init: oom");
+    p.thread = t;
+    const con = vfs.resolve(vfs.root, "/dev/console", true) catch @panic("no /dev/console");
+    for (0..3) |i| p.fds[i] = vfs.openNode(con, vfs.O_RDWR) catch @panic("init: oom");
+    const envp = [_][]const u8{ "HOME=/root", "PATH=/bin:/usr/bin:/sbin", "TERM=vt100", "SHELL=/bin/bash", "USER=root", "PS1=\\u@yos:\\w\\$ " };
+    for (init_candidates) |path| {
+        const n = vfs.resolve(vfs.root, path, true) catch continue;
+        if (n.kind != .file) continue;
+        const argv = [_][]const u8{path};
+        proc.execImage(p, n.contents(), &argv, &envp, t.userFrame(), path) catch |e| {
+            log.info("init: exec {s} failed: {s}", .{ path, @errorName(e) });
+            continue;
+        };
+        log.info("starting init: {s}", .{path});
+        sched.makeReady(t);
+        return;
+    }
+    @panic("no init found");
 }
 
 export fn kmain() callconv(.c) noreturn {
@@ -110,5 +143,14 @@ export fn kmain() callconv(.c) noreturn {
     while (@atomicLoad(u32, &demo_done, .acquire) < 4) sched.sleepMs(20);
     log.info("sched: counters {d} {d} {d} (all progressed under preemption)", .{ counters[0], counters[1], counters[2] });
     log.info("M4 ok", .{});
-    cpu.halt();
+
+    proc.init();
+    signal.init();
+    syscall.init();
+    if (!initrd.init()) @panic("no initrd module");
+    vfs.init();
+    tty.init();
+    startInit();
+    // the boot thread has nothing left to do
+    while (true) sched.sleepMs(1_000_000);
 }
