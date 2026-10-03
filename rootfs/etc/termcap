@@ -1,0 +1,7 @@
+vt100|vt102|xterm|xterm-256color|linux|ansi|screen:\
+	:am:bs:xn:mi:ms:co#80:li#24:it#8:\
+	:cl=\E[H\E[J:cm=\E[%i%d;%dH:ce=\E[K:cd=\E[J:\
+	:up=\E[A:do=^J:nd=\E[C:le=^H:ho=\E[H:cr=^M:\
+	:so=\E[7m:se=\E[m:us=\E[4m:ue=\E[m:md=\E[1m:me=\E[m:mr=\E[7m:\
+	:ku=\EOA:kd=\EOB:kr=\EOC:kl=\EOD:kb=^?:kh=\E[H:@7=\E[F:kD=\E[3~:\
+	:DC=\E[%dP:IC=\E[%d@:dc=\E[P:ic=\E[@:al=\E[L:dl=\E[M:

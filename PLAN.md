@@ -32,7 +32,7 @@ Each milestone is a git tag `mN` pushed to GitHub plus a tarball backup in `back
 - **M4 – scheduler**: kernel threads, context switch, round-robin preemption, sleep/wait queues.
 - **M5 – userspace**: syscall entry, ELF loader, first Linux static binary (`write`/`exit`).
 - **M6 – VFS + processes**: initrd/ramfs, fd table, fork/execve/wait4, pipes, tty/termios, mmap/brk.
-- **M7 – bash**: remaining syscalls + signals needed by bash, interactive prompt over serial.
+- **M7 – bash**: remaining syscalls + signals needed by bash, interactive prompt over serial. ✅ done
 
 ## Later
 SMP, COW fork, real block devices + ext2, framebuffer console, keyboard, networking.

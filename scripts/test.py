@@ -7,7 +7,25 @@ ISO = os.environ.get("ISO", "build/yos.iso")
 
 # (expect, send) steps. `send` may be None.
 STEPS = [
-    ("ALL", None), ("init exited", None),
+    ("starting init: /bin/bash", None),
+    ("# ", "echo hello from bash $BASH_VERSION, 6*7=$((6*7))\n"),
+    ("6*7=42", None),
+    ("# ", "uname -a; ls /bin | head -3; cat /etc/motd | wc -l\n"),
+    ("yos yos", None),
+    ("# ", "for i in 1 2 3; do echo -n \"n$i \"; done; echo; cat /etc/hostname | cat\n"),
+    ("n1 n2 n3", None),
+    ("# ", "cd /tmp && echo data > f.txt && cat f.txt && pwd\n"),
+    ("/tmp", None),
+    ("# ", "ktest\n"),
+    ("TESTS PASSED", None),
+    ("# ", "x=$(echo sub); echo \"[$x]\"; type cd; false || echo or-ok\n"),
+    ("or-ok", None),
+    ("# ", "sleep 30\n"),
+    ("sleep 30", "\x03"),
+    ("# ", "echo interrupted-ok; sleep 0.2 & wait; echo bg-done\n"),
+    ("bg-done", None),
+    ("# ", "exit\n"),
+    ("init exited", None),
 ]
 
 def main():
