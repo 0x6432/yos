@@ -30,15 +30,16 @@ STEPS = [
     ("# ", "jobs; fg; echo fg-done-$?\n"),
     ("fg-done-0", None),
     ("# ", "sleep 5 & kill -STOP %1; sleep 0.1; jobs; kill -CONT %1; kill %1; wait; echo killed-$?\n"),
-    ("Terminated", None),
     ("killed-", None),
+    ("# ", "for i in 1 2 3 4 5 6 7 8; do (x=0; while [ $x -lt 300 ]; do x=$((x+1)); done; echo w$i) & done; wait; echo par-done\n"),
+    ("par-done", None),
     ("# ", "exit\n"),
     ("init exited", None),
 ]
 
 def main():
     timeout = float(os.environ.get("TEST_TIMEOUT", "60"))
-    p = subprocess.Popen([QEMU, "-M", "q35", "-m", "512M", "-cdrom", ISO, "-serial", "stdio",
+    p = subprocess.Popen([QEMU, "-M", "q35", "-m", "512M", "-smp", os.environ.get("SMP", "4"), "-cdrom", ISO, "-serial", "stdio",
                           "-display", "none", "-no-reboot"],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     buf = b""

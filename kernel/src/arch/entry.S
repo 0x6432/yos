@@ -1369,7 +1369,7 @@ kthread_trampoline:
 uthread_trampoline:
     movq %rsp, %rbx
     andq $-16, %rsp
-    call sched_thread_start
+    call sched_uthread_start
     movq %rbx, %rsp
     jmp isr_return
 
@@ -1405,7 +1405,6 @@ syscall_entry:
     pushq %r15
     movq %rsp, %rdi
     cld
-    sti
     call syscall_dispatch
     cli
     jmp isr_return

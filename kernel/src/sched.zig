@@ -1,4 +1,4 @@
-//! Preemptive round-robin scheduler (uniprocessor).
+//! Preemptive round-robin scheduler (SMP: one global run queue, BKL-serialised).
 const std = @import("std");
 const cpu = @import("arch/cpu.zig");
 const gdt = @import("arch/gdt.zig");
@@ -9,6 +9,8 @@ const heap = @import("mm/heap.zig");
 const time = @import("time.zig");
 const log = @import("log.zig");
 const apic = @import("dev/apic.zig");
+const percpu = @import("percpu.zig");
+const sync = @import("sync.zig");
 
 pub const KSTACK_ORDER: u8 = 2; // 16 KiB kernel stacks
 pub const KSTACK_SIZE: usize = pmm.PAGE_SIZE << KSTACK_ORDER;
@@ -49,18 +51,17 @@ pub const Thread = struct {
     }
 };
 
-/// Per-CPU data, reached through GS in kernel mode.
-pub const PerCpu = extern struct {
-    self: u64, // 0
-    kernel_rsp: u64, // 8
-    user_rsp: u64, // 16
-    current: u64, // 24
-};
-pub var percpu: PerCpu = .{ .self = 0, .kernel_rsp = 0, .user_rsp = 0, .current = 0 };
-
 var boot_thread: Thread = .{ .tid = 0, .state = .running };
-pub var current: *Thread = &boot_thread;
-var idle_thread: *Thread = undefined;
+
+/// The thread running on this CPU.
+pub inline fn current() *Thread {
+    return asm volatile ("movq %%gs:24, %[r]"
+        : [r] "=r" (-> *Thread),
+    );
+}
+inline fn idleThread() *Thread {
+    return @ptrFromInt(percpu.get().idle);
+}
 var rq_head: ?*Thread = null;
 var rq_tail: ?*Thread = null;
 var sleepers: ?*Thread = null;
@@ -78,6 +79,7 @@ fn enqueue(t: *Thread) void {
     t.next = null;
     if (rq_tail) |tail| tail.next = t else rq_head = t;
     rq_tail = t;
+    kickIdle();
 }
 fn dequeue() ?*Thread {
     const t = rq_head orelse return null;
@@ -181,12 +183,15 @@ pub fn makeReady(t: *Thread) void {
 
 /// Pick the next thread and switch to it. Interrupts must be disabled.
 fn schedule() void {
-    const prev = current;
-    if (prev.state == .running and prev != idle_thread) {
+    const prev = current();
+    if (prev.state == .running and prev != idleThread()) {
         prev.state = .ready;
-        enqueue(prev);
+        // re-queue without kicking another CPU to steal it mid-switch
+        prev.next = null;
+        if (rq_tail) |tail| tail.next = prev else rq_head = prev;
+        rq_tail = prev;
     }
-    const next = dequeue() orelse idle_thread;
+    const next = dequeue() orelse idleThread();
     next.state = .running;
     if (next == prev) return;
     switchTo(prev, next);
@@ -197,9 +202,9 @@ fn switchTo(prev: *Thread, next: *Thread) void {
         fxsave(&prev.fpu);
         prev.fs_base = cpu.rdmsr(cpu.MSR_FS_BASE);
     }
-    current = next;
-    percpu.current = @intFromPtr(next);
-    percpu.kernel_rsp = next.kstack_top;
+    const pc = percpu.get();
+    pc.current = @intFromPtr(next);
+    pc.kernel_rsp = next.kstack_top;
     gdt.setKernelStack(next.kstack_top);
     if (next.space) |s| {
         s.activate();
@@ -214,7 +219,7 @@ fn switchTo(prev: *Thread, next: *Thread) void {
 
 fn afterSwitch() void {
     if (pending_free) |z| {
-        if (z != current) {
+        if (z != current()) {
             pending_free = null;
             if (z.proc == null) freeThread(z) else {
                 // user thread: stack is released now, struct by its reaper
@@ -230,6 +235,12 @@ export fn sched_thread_start() callconv(.c) void {
     cpu.sti();
 }
 
+/// First run of a user thread: about to iretq to user mode.
+export fn sched_uthread_start() callconv(.c) void {
+    afterSwitch();
+    sync.bklUnlock();
+}
+
 pub fn yield() void {
     const e = cpu.saveDisable();
     schedule();
@@ -239,7 +250,7 @@ pub fn yield() void {
 /// Block the current thread (state already set by caller with ints off).
 pub fn block() void {
     const e = cpu.saveDisable();
-    current.state = .blocked;
+    current().state = .blocked;
     schedule();
     cpu.restore(e);
 }
@@ -260,20 +271,20 @@ export fn sched_kthread_exit() callconv(.c) noreturn {
 /// Terminate the current thread; never returns.
 pub fn exitCurrent() noreturn {
     cpu.cli();
-    current.state = .zombie;
-    pending_free = current;
+    current().state = .zombie;
+    pending_free = current();
     schedule();
     unreachable;
 }
 
 pub fn sleepTicks(n: u64) void {
     const e = cpu.saveDisable();
-    current.wake_tick = time.now() + n;
-    current.sleeping = true;
-    current.state = .blocked;
+    current().wake_tick = time.now() + n;
+    current().sleeping = true;
+    current().state = .blocked;
     // insert into sleep list (unsorted; small)
-    current.next = null;
-    var t = current;
+    current().next = null;
+    var t = current();
     t.next = sleepers;
     sleepers = t;
     schedule();
@@ -321,32 +332,108 @@ pub fn cancelSleep(t: *Thread) void {
 
 fn onTick(frame: *idt.TrapFrame) void {
     wakeSleepers();
-    if (frame.fromUser() or current.preemptible or current == idle_thread) {
+    if (frame.fromUser() or current().preemptible or current() == idleThread()) {
         schedule();
     }
 }
 
-fn idleLoop(_: u64) callconv(.c) void {
+/// Idle: runs with the BKL held, drops it only while halted.
+fn idleLoop(_: u64) callconv(.c) noreturn {
+    cpu.cli();
     while (true) {
-        cpu.sti();
-        cpu.hlt();
-        cpu.cli();
-        if (rq_head != null) schedule();
+        if (rq_head != null) {
+            schedule();
+            continue;
+        }
+        sync.bklUnlock();
+        asm volatile ("sti; hlt; cli" ::: .{ .memory = true });
+        sync.bklLock();
+    }
+}
+
+/// Early: make `current()` valid on the BSP (GS must already be installed).
+pub fn initBoot() void {
+    boot_thread.setName("boot");
+    boot_thread.kstack_top = 0;
+    percpu.cpus[0].current = @intFromPtr(&boot_thread);
+}
+
+fn makeIdle(cpu_id: usize) *Thread {
+    var name = [_]u8{ 'i', 'd', 'l', 'e', '0' + @as(u8, @intCast(cpu_id % 10)) };
+    const t = spawnKernel(&name, @ptrCast(&idleLoop), 0) catch @panic("idle");
+    // idle is never on the run queue
+    _ = dequeueThread(t);
+    t.state = .ready;
+    percpu.cpus[cpu_id].idle = @intFromPtr(t);
+    return t;
+}
+
+fn dequeueThread(t: *Thread) bool {
+    var prev: ?*Thread = null;
+    var it = rq_head;
+    while (it) |x| : (it = x.next) {
+        if (x == t) {
+            if (prev) |p| p.next = x.next else rq_head = x.next;
+            if (rq_tail == x) rq_tail = prev;
+            x.next = null;
+            return true;
+        }
+        prev = x;
+    }
+    return false;
+}
+
+/// Per-AP FPU enable (the template is captured once on the BSP).
+pub fn initCpuFpu() void {
+    var cr0 = cpu.readCr0();
+    cr0 &= ~@as(u64, 1 << 2);
+    cr0 |= 1 << 1;
+    cr0 &= ~@as(u64, 1 << 3);
+    cpu.writeCr0(cr0);
+    cpu.writeCr4(cpu.readCr4() | (1 << 9) | (1 << 10));
+    asm volatile ("fninit");
+    fxrstor(&fpu_template);
+}
+
+/// An AP enters the scheduler: becomes its idle thread. BKL must be held.
+pub fn enterAp(cpu_id: usize) noreturn {
+    const idle = makeIdle(cpu_id);
+    idle.state = .running;
+    const pc = &percpu.cpus[cpu_id];
+    pc.current = @intFromPtr(idle);
+    pc.kernel_rsp = idle.kstack_top;
+    gdt.setKernelStack(idle.kstack_top);
+    pc.online = true;
+    // switch onto the idle thread's own stack
+    asm volatile (
+        \\movq %[sp], %%rsp
+        \\xorl %%ebp, %%ebp
+        \\call *%[f]
+        :
+        : [sp] "r" (idle.kstack_top - 16),
+          [f] "r" (&idleLoop),
+          [a] "{rdi}" (@as(u64, 0)),
+        : .{ .memory = true }
+    );
+    unreachable;
+}
+
+/// Wake one halted CPU so it picks up newly runnable work.
+fn kickIdle() void {
+    if (percpu.count <= 1) return;
+    const me = percpu.id();
+    for (percpu.cpus[0..percpu.count], 0..) |*c, i| {
+        if (i == me or !c.online) continue;
+        if (c.current == c.idle) {
+            apic.sendIpi(@intCast(c.lapic_id), apic.WAKE_VECTOR);
+            return;
+        }
     }
 }
 
 pub fn init() void {
     enableFpu();
-    boot_thread.setName("boot");
-    boot_thread.kstack_top = 0;
-    percpu.self = @intFromPtr(&percpu);
-    percpu.current = @intFromPtr(&boot_thread);
-    cpu.wrmsr(cpu.MSR_GS_BASE, @intFromPtr(&percpu));
-    cpu.wrmsr(cpu.MSR_KERNEL_GS_BASE, 0);
-    idle_thread = spawnKernel("idle", idleLoop, 0) catch @panic("idle");
-    // idle is never on the run queue
-    _ = dequeue();
-    idle_thread.state = .ready;
+    _ = makeIdle(0);
     apic.timer_handler = onTick;
     started = true;
     log.info("sched: round-robin scheduler ready", .{});
@@ -361,10 +448,10 @@ pub const WaitQueue = struct {
     /// Sleep until woken. Call with interrupts disabled after checking the
     /// condition; returns with interrupts disabled.
     pub fn waitLocked(self: *WaitQueue) void {
-        var w = Waiter{ .t = current };
+        var w = Waiter{ .t = current() };
         w.next = self.head;
         self.head = &w;
-        current.state = .blocked;
+        current().state = .blocked;
         schedule();
         // unlink if still present (spurious wakeup / interrupted)
         var pp: *?*Waiter = &self.head;

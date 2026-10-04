@@ -15,6 +15,8 @@ const sched = @import("sched.zig");
 const proc = @import("proc.zig");
 const vfs = @import("vfs.zig");
 const signal = @import("signal.zig");
+const percpu = @import("percpu.zig");
+const smp = @import("smp.zig");
 const syscall = @import("syscall.zig");
 const initrd = @import("initrd.zig");
 const tty = @import("dev/tty.zig");
@@ -27,7 +29,8 @@ pub const panic = std.debug.FullPanic(panicHandler);
 
 fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
     cpu.cli();
-    log.print("\n!!! KERNEL PANIC: {s}\n", .{msg});
+    if (percpu.count > 1) @import("dev/apic.zig").sendNmiAllOthers();
+    log.print("\n!!! KERNEL PANIC (cpu{d}): {s}\n", .{ percpu.id(), msg });
     if (first_trace_addr) |a| log.print("    at 0x{x}\n", .{a});
     // walk the frame-pointer chain (kernel is built with frame pointers)
     var fp: usize = @frameAddress();
@@ -100,6 +103,8 @@ export fn kmain() callconv(.c) noreturn {
     }
     log.info("usable memory: {d} MiB in {d} entries", .{ total >> 20, mm.entry_count });
     gdt.init();
+    percpu.install(0);
+    sched.initBoot();
     idt.init();
     log.info("gdt/tss/idt loaded", .{});
     pmm.init();
@@ -154,6 +159,7 @@ export fn kmain() callconv(.c) noreturn {
     if (!initrd.init()) @panic("no initrd module");
     vfs.init();
     tty.init();
+    smp.init();
     startInit();
     // the boot thread has nothing left to do
     while (true) sched.sleepMs(1_000_000);

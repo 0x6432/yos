@@ -3,7 +3,8 @@ QEMU   ?= qemu-system-x86_64
 OPT    ?= ReleaseSafe
 LIMINE := deps/limine
 ISO    := build/yos.iso
-QEMUFLAGS ?= -M q35 -m 512M -cdrom $(ISO) -serial stdio -display none -no-reboot -no-shutdown
+SMP    ?= 4
+QEMUFLAGS ?= -M q35 -m 512M -smp $(SMP) -cdrom $(ISO) -serial stdio -display none -no-reboot -no-shutdown
 
 .PHONY: all kernel initrd iso run test clean deps
 

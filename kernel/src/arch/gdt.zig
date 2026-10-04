@@ -20,7 +20,9 @@ pub const Tss = extern struct {
 
 const GdtPtr = extern struct { limit: u16 align(1), base: u64 align(1) };
 
-var gdt: [7]u64 = .{
+const percpu = @import("../percpu.zig");
+
+const gdt_template: [7]u64 = .{
     0,
     0x00AF9A000000FFFF, // kernel code
     0x00CF92000000FFFF, // kernel data
@@ -28,27 +30,39 @@ var gdt: [7]u64 = .{
     0x00AFFA000000FFFF, // user code
     0, 0, // TSS
 };
-pub var tss: Tss = .{};
-var df_stack: [16384]u8 align(16) = undefined;
-var nmi_stack: [8192]u8 align(16) = undefined;
+var gdts: [percpu.MAX_CPUS][7]u64 = undefined;
+var tsss: [percpu.MAX_CPUS]Tss = [_]Tss{.{}} ** percpu.MAX_CPUS;
+var df_stacks: [percpu.MAX_CPUS][16384]u8 align(16) = undefined;
+var nmi_stacks: [percpu.MAX_CPUS][8192]u8 align(16) = undefined;
 
 extern fn gdt_load(ptr: *const GdtPtr) callconv(.c) void;
 
-pub fn init() void {
-    tss.ist[0] = @intFromPtr(&df_stack) + df_stack.len;
-    tss.ist[1] = @intFromPtr(&nmi_stack) + nmi_stack.len;
-    const base = @intFromPtr(&tss);
+/// Load a GDT + TSS for CPU `i`. Note: reloading segments zeroes GS_BASE.
+pub fn initCpu(i: usize) void {
+    const tss = &tsss[i];
+    tss.* = .{};
+    tss.ist[0] = @intFromPtr(&df_stacks[i]) + df_stacks[i].len;
+    tss.ist[1] = @intFromPtr(&nmi_stacks[i]) + nmi_stacks[i].len;
+    const g = &gdts[i];
+    g.* = gdt_template;
+    const base = @intFromPtr(tss);
     const limit: u64 = @sizeOf(Tss) - 1;
-    gdt[5] = limit | ((base & 0xFFFFFF) << 16) | (0x89 << 40) | (((base >> 24) & 0xFF) << 56);
-    gdt[6] = base >> 32;
-    const ptr = GdtPtr{ .limit = @sizeOf(@TypeOf(gdt)) - 1, .base = @intFromPtr(&gdt) };
+    g[5] = limit | ((base & 0xFFFFFF) << 16) | (0x89 << 40) | (((base >> 24) & 0xFF) << 56);
+    g[6] = base >> 32;
+    const ptr = GdtPtr{ .limit = @sizeOf([7]u64) - 1, .base = @intFromPtr(g) };
     gdt_load(&ptr);
     asm volatile ("ltr %[s]"
         :
         : [s] "r" (TSS_SEL),
     );
+    percpu.cpus[i].tss = base;
+}
+
+pub fn init() void {
+    initCpu(0);
 }
 
 pub fn setKernelStack(top: u64) void {
-    tss.rsp0 = top;
+    const t: *Tss = @ptrFromInt(percpu.get().tss);
+    t.rsp0 = top;
 }

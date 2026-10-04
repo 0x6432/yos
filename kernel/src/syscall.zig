@@ -10,6 +10,7 @@ const sched = @import("sched.zig");
 const proc = @import("proc.zig");
 const vfs = @import("vfs.zig");
 const signal = @import("signal.zig");
+const sync = @import("sync.zig");
 const tty = @import("dev/tty.zig");
 const time = @import("time.zig");
 const log = @import("log.zig");
@@ -24,17 +25,28 @@ const Frame = idt.TrapFrame;
 extern fn syscall_entry() callconv(.c) void;
 
 pub fn init() void {
+    initCpu();
+    log.info("syscall: entry installed (Linux x86_64 ABI)", .{});
+}
+
+/// Program this CPU's SYSCALL MSRs.
+pub fn initCpu() void {
     cpu.wrmsr(cpu.MSR_EFER, cpu.rdmsr(cpu.MSR_EFER) | 1); // SCE
     cpu.wrmsr(cpu.MSR_STAR, (@as(u64, 0x10) << 48) | (@as(u64, 0x08) << 32));
     cpu.wrmsr(cpu.MSR_LSTAR, @intFromPtr(&syscall_entry));
     cpu.wrmsr(cpu.MSR_SFMASK, 0x47700); // IF, TF, DF, AC, NT
-    log.info("syscall: entry installed (Linux x86_64 ABI)", .{});
 }
 
 pub var trace = false;
 var warned: std.StaticBitSet(512) = std.StaticBitSet(512).initEmpty();
 
 export fn syscall_dispatch(frame: *Frame) callconv(.c) void {
+    sync.bklLock();
+    defer {
+        cpu.cli();
+        sync.bklUnlock();
+    }
+    cpu.sti();
     const nr = frame.rax;
     const p = proc.current();
     const r = handle(nr, frame);
@@ -168,10 +180,11 @@ fn handle(nr: u64, f: *Frame) isize {
             break :blk t;
         },
         202 => sysFutex(a0, a1, a2),
-        204 => -E.ENOSYS, // sched_getaffinity
+        204 => sysGetaffinity(a1, a2),
+        203 => 0, // sched_setaffinity: accepted, ignored
         217 => sysGetdents64(a0, a1, a2),
         218 => blk: {
-            sched.current.clear_child_tid = a0;
+            sched.current().clear_child_tid = a0;
             break :blk proc.current().pid;
         },
         228 => sysClockGettime(a0, a1),
@@ -1044,7 +1057,7 @@ fn doFork(f: *Frame, newsp: u64, flags: u64, tls: u64) isize {
     var cf = f.*;
     cf.rax = 0;
     if (newsp != 0) cf.rsp = newsp;
-    const t = sched.spawnUser(sched.current.nameSlice(), cf, space, child) catch return -E.ENOMEM;
+    const t = sched.spawnUser(sched.current().nameSlice(), cf, space, child) catch return -E.ENOMEM;
     child.thread = t;
     asm volatile ("fxsave64 (%[b])"
         :
@@ -1287,6 +1300,17 @@ fn sysSetpgid(pid_in: i32, pgid_in: i32) isize {
 fn sysGetpgid(pid: i32) isize {
     const t = if (pid == 0) proc.current() else (proc.byPid(pid) orelse return -E.ESRCH);
     return t.pgid;
+}
+
+fn sysGetaffinity(len: u64, mask_addr: u64) isize {
+    const percpu = @import("percpu.zig");
+    if (len < 8) return -E.EINVAL;
+    var m: u64 = 0;
+    for (percpu.cpus[0..percpu.count], 0..) |*c, i| {
+        if (c.online) m |= @as(u64, 1) << @intCast(i);
+    }
+    proc.writeUser(u64, mask_addr, m) catch return -E.EFAULT;
+    return 8;
 }
 
 fn sysGetsid(pid: i32) isize {
@@ -1563,12 +1587,12 @@ fn sysArchPrctl(code: u64, addr: u64) isize {
     switch (code) {
         0x1002 => { // ARCH_SET_FS
             if (addr >= vmm.USER_TOP) return -E.EPERM;
-            sched.current.fs_base = addr;
+            sched.current().fs_base = addr;
             cpu.wrmsr(cpu.MSR_FS_BASE, addr);
             return 0;
         },
         0x1003 => {
-            proc.writeUser(u64, addr, sched.current.fs_base) catch return -E.EFAULT;
+            proc.writeUser(u64, addr, sched.current().fs_base) catch return -E.EFAULT;
             return 0;
         },
         0x1001 => {

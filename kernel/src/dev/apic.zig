@@ -9,6 +9,8 @@ const time = @import("../time.zig");
 pub const TIMER_VECTOR: u8 = 32;
 pub const IRQ_BASE: u8 = 48;
 pub const SPURIOUS: u8 = 0xFF;
+pub const WAKE_VECTOR: u8 = 0xF0;
+const percpu = @import("../percpu.zig");
 
 var lapic: u64 = 0;
 
@@ -52,21 +54,57 @@ fn disablePic() void {
 pub fn initLapic(phys: u64) void {
     disablePic();
     lapic = vmm.mapMmio(phys, 4096);
-    cpu.wrmsr(cpu.MSR_APIC_BASE, cpu.rdmsr(cpu.MSR_APIC_BASE) | (1 << 11));
-    lw(0xF0, 0x100 | @as(u32, SPURIOUS)); // enable + spurious vector
-    lw(0x80, 0); // TPR
+    enableLocal();
     idt.register(SPURIOUS, struct {
         fn h(_: *idt.TrapFrame) void {}
+    }.h);
+    // wake-up IPI: the interrupt itself is the point (breaks `hlt`)
+    idt.register(WAKE_VECTOR, struct {
+        fn h(_: *idt.TrapFrame) void {
+            eoi();
+        }
     }.h);
     log.info("apic: LAPIC id {d} at phys 0x{x}", .{ lapicId(), phys });
 }
 
 pub var timer_handler: ?*const fn (*idt.TrapFrame) void = null;
 
+/// Enable this CPU's local APIC.
+pub fn enableLocal() void {
+    cpu.wrmsr(cpu.MSR_APIC_BASE, cpu.rdmsr(cpu.MSR_APIC_BASE) | (1 << 11));
+    lw(0xF0, 0x100 | @as(u32, SPURIOUS)); // enable + spurious vector
+    lw(0x80, 0); // TPR
+}
+
+/// Send a fixed IPI to the CPU with the given LAPIC id.
+pub fn sendIpi(dest: u32, vector: u8) void {
+    while (lr(0x300) & (1 << 12) != 0) cpu.pause();
+    lw(0x310, dest << 24);
+    lw(0x300, vector);
+}
+
+/// INIT/SIPI are done by Limine; this only sends NMIs on panic.
+pub fn sendNmiAllOthers() void {
+    while (lr(0x300) & (1 << 12) != 0) cpu.pause();
+    lw(0x310, 0);
+    lw(0x300, (3 << 18) | (4 << 8)); // all excluding self, NMI
+}
+
 fn timerIrq(f: *idt.TrapFrame) void {
-    _ = @atomicRmw(u64, &time.ticks, .Add, 1, .monotonic);
+    const pc = percpu.get();
+    pc.ticks += 1;
+    if (pc.id == 0) _ = @atomicRmw(u64, &time.ticks, .Add, 1, .monotonic);
     eoi();
     if (timer_handler) |h| h(f);
+}
+
+var timer_count: u32 = 0;
+
+/// Start this CPU's periodic timer with the calibrated count.
+pub fn startTimerLocal() void {
+    lw(0x3E0, 0x3); // divide by 16
+    lw(0x320, @as(u32, TIMER_VECTOR) | (1 << 17)); // periodic
+    lw(0x380, timer_count);
 }
 
 pub fn startTimer() void {
@@ -77,9 +115,9 @@ pub fn startTimer() void {
     const elapsed = 0xFFFFFFFF - lr(0x390);
     lw(0x380, 0);
     const per_tick: u32 = @intCast(elapsed * 100 / time.HZ);
+    timer_count = per_tick;
     idt.register(TIMER_VECTOR, timerIrq);
-    lw(0x320, @as(u32, TIMER_VECTOR) | (1 << 17)); // periodic
-    lw(0x380, per_tick);
+    startTimerLocal();
     log.info("apic: timer {d} Hz ({d} counts/tick)", .{ time.HZ, per_tick });
 }
 

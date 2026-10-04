@@ -1,6 +1,7 @@
 const std = @import("std");
 const cpu = @import("cpu.zig");
 const log = @import("../log.zig");
+const sync = @import("../sync.zig");
 
 pub const TrapFrame = extern struct {
     r15: u64,
@@ -67,6 +68,11 @@ pub fn init() void {
     for (0..256) |i| set(i, isr_table[i], 0, 0);
     set(8, isr_table[8], 1, 0); // double fault on IST1
     set(2, isr_table[2], 2, 0); // NMI on IST2
+    load();
+}
+
+/// Load the (shared) IDT on this CPU.
+pub fn load() void {
     const Ptr = extern struct { limit: u16 align(1), base: u64 align(1) };
     const p = Ptr{ .limit = @sizeOf(@TypeOf(idt)) - 1, .base = @intFromPtr(&idt) };
     asm volatile ("lidt (%[p])"
@@ -97,6 +103,19 @@ pub fn dumpFrame(f: *const TrapFrame) void {
 }
 
 export fn interrupt_dispatch(frame: *TrapFrame) callconv(.c) void {
+    // NMIs may arrive anywhere; never touch the BKL for them.
+    if (frame.vector == 2) {
+        if (handlers[2]) |h| h(frame) else cpu.halt();
+        return;
+    }
+    // Entry from user mode (or into a halted idle CPU): take the BKL.
+    const took = !sync.bklHeld();
+    if (took) sync.bklLock();
+    dispatch(frame);
+    if (took) sync.bklUnlock();
+}
+
+fn dispatch(frame: *TrapFrame) void {
     const v = frame.vector;
     if (handlers[v]) |h| {
         h(frame);

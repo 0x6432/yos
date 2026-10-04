@@ -58,7 +58,8 @@ kernel/src/arch/           cpu helpers, GDT/TSS, IDT, entry.S (ISRs, syscall, co
 kernel/src/mm/             pmm.zig (buddy), vmm.zig (paging), heap.zig (slab)
 kernel/src/acpi.zig        uACPI kernel API + MADT
 kernel/src/dev/            apic.zig, tty.zig
-kernel/src/sched.zig       round-robin scheduler, wait queues
+kernel/src/sched.zig       round-robin scheduler (SMP), wait queues
+kernel/src/smp.zig         AP bring-up (Limine MP), percpu.zig per-CPU data, sync.zig BKL
 kernel/src/proc.zig        processes, VMAs, exec, exit
 kernel/src/syscall.zig     Linux syscall table
 kernel/src/vfs.zig         ramfs, files, pipes, devices

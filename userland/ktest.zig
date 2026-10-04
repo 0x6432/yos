@@ -167,6 +167,8 @@ pub fn main() !void {
     }
     // ---- full signals (M9) ----
     try signalTests();
+    // ---- SMP (M11) ----
+    try smpTests();
     if (failures == 0) {
         sys.print("[ktest] ALL {d} TESTS PASSED\n", .{passed});
     } else {
@@ -359,4 +361,66 @@ fn signalTests() !void {
         _ = sys.sigaction(SIG.CHLD, SIG.DFL, 0, 0);
         check(r == -10, "SIGCHLD SIG_IGN auto-reap (ECHILD)");
     }
+}
+
+// ------------------------------------------------------------------
+// M11 SMP tests
+// ------------------------------------------------------------------
+fn spin(iters: u64) u64 {
+    var x: u64 = 1;
+    var i: u64 = 0;
+    while (i < iters) : (i += 1) x = x *% 6364136223846793005 +% 1442695040888963407;
+    return x;
+}
+
+fn runSpinners(n: usize, iters: u64) !i64 {
+    const t0 = sys.clockMonotonic();
+    var pids: [8]i32 = undefined;
+    for (0..n) |i| {
+        const pid = try sys.fork();
+        if (pid == 0) {
+            std.mem.doNotOptimizeAway(spin(iters));
+            sys.exit(0);
+        }
+        pids[i] = pid;
+    }
+    for (pids[0..n]) |p| _ = sys.waitpid(p, 0);
+    const t1 = sys.clockMonotonic();
+    return (t1.sec - t0.sec) * 1000 + @divTrunc(t1.nsec - t0.nsec, 1_000_000);
+}
+
+fn smpTests() !void {
+    var m: u64 = 0;
+    const r = sys.sys(.sched_getaffinity, .{ @as(usize, 0), @as(usize, 8), &m });
+    const ncpu = @popCount(m);
+    check(r == 8 and ncpu >= 1, "sched_getaffinity reports online CPUs");
+    // calibrate ~150ms of work on one CPU, then run 4 copies at once
+    var iters: u64 = 2_000_000;
+    var t1 = try runSpinners(1, iters);
+    while (t1 < 100 and iters < (1 << 34)) {
+        iters *= 2;
+        t1 = try runSpinners(1, iters);
+    }
+    const t4 = try runSpinners(4, iters);
+    const par = @min(ncpu, 4);
+    sys.print("[ktest] smp: {d} cpus, 1 job {d}ms, 4 jobs {d}ms (ideal {d}ms)\n", .{ ncpu, t1, t4, @divTrunc(t1 * 4, @as(i64, @intCast(par))) });
+    // all 4 must finish; with >1 CPU they must overlap at least somewhat
+    check(t4 > 0 and (ncpu == 1 or t4 < t1 * 4 - @divTrunc(t1, 4)), "parallel jobs overlap across CPUs");
+    // fork storm across CPUs: many short-lived children, all reaped
+    var ok = true;
+    var live: [16]i32 = undefined;
+    for (0..8) |_| {
+        for (&live, 0..) |*p, i| {
+            p.* = try sys.fork();
+            if (p.* == 0) {
+                std.mem.doNotOptimizeAway(spin(1000 * (i + 1)));
+                sys.exit(@intCast(i));
+            }
+        }
+        for (live, 0..) |p, i| {
+            const w = sys.waitpid(p, 0);
+            if (w.pid != p or W.EXITSTATUS(w.status) != i) ok = false;
+        }
+    }
+    check(ok, "fork storm: 128 children across CPUs");
 }

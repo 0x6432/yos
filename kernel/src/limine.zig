@@ -65,6 +65,26 @@ pub const StackSizeRequest = extern struct {
     response: ?*volatile StackSizeResponse = null,
     stack_size: u64,
 };
+pub const MpInfo = extern struct {
+    processor_id: u32,
+    lapic_id: u32,
+    reserved: u64,
+    goto_address: ?*const fn (*MpInfo) callconv(.c) noreturn,
+    extra_argument: u64,
+};
+pub const MpResponse = extern struct {
+    revision: u64,
+    flags: u32,
+    bsp_lapic_id: u32,
+    cpu_count: u64,
+    cpus: [*]*MpInfo,
+};
+pub const MpRequest = extern struct {
+    id: [4]u64 = id(0x95a67b819a1b857e, 0xa0b61b723b6a73e0),
+    revision: u64 = 0,
+    response: ?*volatile MpResponse = null,
+    flags: u64 = 0,
+};
 pub const BootTimeResponse = extern struct { revision: u64, boot_time: i64 };
 
 pub const HhdmRequest = Request(HhdmResponse, 0x48dcf1cb8ad2b852, 0x63984e959a98244b);
@@ -84,6 +104,7 @@ export var limine_rsdp linksection(".limine_requests") = RsdpRequest{};
 export var limine_kaddr linksection(".limine_requests") = KernelAddressRequest{};
 export var limine_boottime linksection(".limine_requests") = BootTimeRequest{};
 export var limine_stack linksection(".limine_requests") = StackSizeRequest{ .stack_size = 128 * 1024 };
+export var limine_mp linksection(".limine_requests") = MpRequest{};
 export var limine_end_marker linksection(".limine_requests_end") = [2]u64{ 0xadc0e0531bb10d03, 0x9572709f31764c62 };
 
 pub fn baseRevisionSupported() bool {
@@ -107,4 +128,7 @@ pub fn kernelAddress() *volatile KernelAddressResponse {
 }
 pub fn bootTime() i64 {
     return if (limine_boottime.response) |r| r.boot_time else 0;
+}
+pub fn mp() ?*volatile MpResponse {
+    return limine_mp.response;
 }

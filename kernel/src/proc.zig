@@ -233,10 +233,10 @@ pub var procs: std.ArrayList(*Process) = .empty;
 var next_pid: i32 = 1;
 
 pub fn current() *Process {
-    return @ptrCast(@alignCast(sched.current.proc.?));
+    return @ptrCast(@alignCast(sched.current().proc.?));
 }
 pub fn currentOrNull() ?*Process {
-    return @ptrCast(@alignCast(sched.current.proc));
+    return @ptrCast(@alignCast(sched.current().proc));
 }
 
 pub fn byPid(pid: i32) ?*Process {
@@ -532,7 +532,7 @@ pub fn execImage(p: *Process, data: []const u8, argv: []const []const u8, envp: 
     p.thread.fs_base = 0;
     p.thread.fpu = sched.fpu_template;
     const e = cpu.saveDisable();
-    if (sched.current == p.thread) {
+    if (sched.current() == p.thread) {
         space.activate();
         cpu.wrmsr(cpu.MSR_FS_BASE, 0);
     }
