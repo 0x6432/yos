@@ -443,7 +443,7 @@ fn setupFrame(p: *proc.Process, frame: *idt.TrapFrame, sig: u32, a: Action, info
     asm volatile ("fxsave64 (%[b])"
         :
         : [b] "r" (&p.thread.fpu),
-        : "memory"
+        : .{ .memory = true }
     );
     sf.fpu = p.thread.fpu;
     sf.uc.fpstate = sp + @offsetOf(SigFrame, "fpu");
@@ -493,7 +493,7 @@ pub fn sigreturn(frame: *idt.TrapFrame) void {
     asm volatile ("fxrstor64 (%[b])"
         :
         : [b] "r" (&p.thread.fpu),
-        : "memory"
+        : .{ .memory = true }
     );
 }
 

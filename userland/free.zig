@@ -1,4 +1,4 @@
-const std = @import("std");
+const sys = @import("lib/sys.zig");
 const SysInfo = extern struct {
     uptime: i64,
     loads: [3]u64,
@@ -16,11 +16,10 @@ const SysInfo = extern struct {
     mem_unit: u32,
     _f: [4]u8,
 };
-pub fn main() !void {
+pub fn main() void {
     var si: SysInfo = undefined;
-    _ = std.os.linux.syscall1(.sysinfo, @intFromPtr(&si));
-    const w = std.io.getStdOut().writer();
-    try w.print("              total        used        free\n", .{});
-    try w.print("Mem:   {d:>12} {d:>11} {d:>11}  (KiB)\n", .{ si.totalram / 1024, (si.totalram - si.freeram) / 1024, si.freeram / 1024 });
-    try w.print("uptime: {d}s, processes: {d}\n", .{ si.uptime, si.procs });
+    _ = sys.sys(.sysinfo, .{&si});
+    sys.print("              total        used        free\n", .{});
+    sys.print("Mem:   {d:>12} {d:>11} {d:>11}  (KiB)\n", .{ si.totalram / 1024, (si.totalram - si.freeram) / 1024, si.freeram / 1024 });
+    sys.print("uptime: {d}s, processes: {d}\n", .{ si.uptime, si.procs });
 }

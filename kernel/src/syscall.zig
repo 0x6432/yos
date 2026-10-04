@@ -1049,14 +1049,14 @@ fn doFork(f: *Frame, newsp: u64, flags: u64, tls: u64) isize {
     asm volatile ("fxsave64 (%[b])"
         :
         : [b] "r" (&t.fpu),
-        : "memory"
+        : .{ .memory = true }
     );
     t.fs_base = if (flags & CLONE_SETTLS != 0) tls else cpu.rdmsr(cpu.MSR_FS_BASE);
     sched.makeReady(t);
     return child.pid;
 }
 
-fn readStrArray(addr: u64, list: *std.ArrayListUnmanaged([]const u8)) !void {
+fn readStrArray(addr: u64, list: *std.ArrayList([]const u8)) !void {
     if (addr == 0) return;
     var i: u64 = 0;
     while (i < 4096) : (i += 1) {
@@ -1072,7 +1072,7 @@ fn readStrArray(addr: u64, list: *std.ArrayListUnmanaged([]const u8)) !void {
     return error.TooBig;
 }
 
-fn freeStrList(list: *std.ArrayListUnmanaged([]const u8)) void {
+fn freeStrList(list: *std.ArrayList([]const u8)) void {
     for (list.items) |s| alloc.free(s);
     list.deinit(alloc);
 }
@@ -1080,16 +1080,16 @@ fn freeStrList(list: *std.ArrayListUnmanaged([]const u8)) void {
 fn sysExecve(f: *Frame, path_addr: u64, argv_addr: u64, envp_addr: u64) isize {
     var pbuf: [4096]u8 = undefined;
     const path = readPath(path_addr, &pbuf) catch |e| return err(e);
-    var argv: std.ArrayListUnmanaged([]const u8) = .{};
+    var argv: std.ArrayList([]const u8) = .empty;
     defer freeStrList(&argv);
-    var envp: std.ArrayListUnmanaged([]const u8) = .{};
+    var envp: std.ArrayList([]const u8) = .empty;
     defer freeStrList(&envp);
     readStrArray(argv_addr, &argv) catch |e| return if (e == error.TooBig) -E.E2BIG else -E.EFAULT;
     readStrArray(envp_addr, &envp) catch |e| return if (e == error.TooBig) -E.E2BIG else -E.EFAULT;
     return execPath(f, path, &argv, envp.items, 0);
 }
 
-pub fn execPath(f: *Frame, path: []const u8, argv: *std.ArrayListUnmanaged([]const u8), envp: []const []const u8, depth: u32) isize {
+pub fn execPath(f: *Frame, path: []const u8, argv: *std.ArrayList([]const u8), envp: []const []const u8, depth: u32) isize {
     const p = proc.current();
     const n = vfs.resolve(p.cwd, path, true) catch |e| return err(e);
     if (n.kind == .dir) return -E.EACCES;
@@ -1104,7 +1104,7 @@ pub fn execPath(f: *Frame, path: []const u8, argv: *std.ArrayListUnmanaged([]con
         const sp = std.mem.indexOfAny(u8, line, " \t");
         const interp = if (sp) |s| line[0..s] else line;
         const iarg = if (sp) |s| std.mem.trim(u8, line[s..], " \t") else "";
-        var nargv: std.ArrayListUnmanaged([]const u8) = .{};
+        var nargv: std.ArrayList([]const u8) = .empty;
         defer freeStrList(&nargv);
         nargv.append(alloc, alloc.dupe(u8, interp) catch return -E.ENOMEM) catch return -E.ENOMEM;
         if (iarg.len > 0) nargv.append(alloc, alloc.dupe(u8, iarg) catch return -E.ENOMEM) catch return -E.ENOMEM;

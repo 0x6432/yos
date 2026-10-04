@@ -200,9 +200,9 @@ pub fn selfTest() void {
         for (p[0..sz]) |b| if (b != @as(u8, @truncate(i))) @panic("heap selftest: corruption");
     }
     for (ptrs) |p| kfree(p);
-    var list = std.ArrayList(u64).init(allocator);
-    for (0..10000) |i| list.append(i) catch @panic("heap selftest: arraylist");
-    list.deinit();
+    var list: std.ArrayList(u64) = .empty;
+    for (0..10000) |i| list.append(allocator, i) catch @panic("heap selftest: arraylist");
+    list.deinit(allocator);
     const leaked = @as(isize, @intCast(before)) - @as(isize, @intCast(pmm.free_pages));
     log.info("heap: slab self test passed (residual cached slab pages: {d})", .{leaked});
 }

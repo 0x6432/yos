@@ -44,7 +44,7 @@ pub const Process = struct {
     parent: ?*Process = null,
     thread: *sched.Thread = undefined,
     space: vmm.AddressSpace,
-    vmas: std.ArrayListUnmanaged(Vma) = .{},
+    vmas: std.ArrayList(Vma) = .empty,
     brk_start: u64 = 0,
     brk: u64 = 0,
     zombie: bool = false,
@@ -229,7 +229,7 @@ pub const Process = struct {
 };
 
 // ---------------- process table ----------------
-pub var procs: std.ArrayListUnmanaged(*Process) = .{};
+pub var procs: std.ArrayList(*Process) = .empty;
 var next_pid: i32 = 1;
 
 pub fn current() *Process {
@@ -363,7 +363,7 @@ const AT_EXECFN = 31;
 const Builder = struct {
     p: *Process,
     space: vmm.AddressSpace,
-    vmas: *std.ArrayListUnmanaged(Vma),
+    vmas: *std.ArrayList(Vma),
 
     fn findVma(self: *Builder, addr: u64) ?*Vma {
         for (self.vmas.items) |*v| if (addr >= v.start and addr < v.end) return v;
@@ -425,7 +425,7 @@ pub const ExecError = error{ NotFound, NotElf, Unsupported, OutOfMemory, Fault, 
 /// and fills `frame` with the user entry state. On error the old image is intact.
 pub fn execImage(p: *Process, data: []const u8, argv: []const []const u8, envp: []const []const u8, frame: *idt.TrapFrame, path: []const u8) ExecError!void {
     const space = try vmm.AddressSpace.createUser();
-    var vmas: std.ArrayListUnmanaged(Vma) = .{};
+    var vmas: std.ArrayList(Vma) = .empty;
     var b = Builder{ .p = p, .space = space, .vmas = &vmas };
     const info = elf.load(data, &b) catch |e| {
         vmas.deinit(alloc);
@@ -461,9 +461,9 @@ pub fn execImage(p: *Process, data: []const u8, argv: []const []const u8, envp: 
     const execfn_addr = sp;
     _ = pushBytes(&b, &sp, &zero) catch return error.OutOfMemory;
 
-    var arg_ptrs = std.ArrayListUnmanaged(u64){};
+    var arg_ptrs = std.ArrayList(u64).empty;
     defer arg_ptrs.deinit(alloc);
-    var env_ptrs = std.ArrayListUnmanaged(u64){};
+    var env_ptrs = std.ArrayList(u64).empty;
     defer env_ptrs.deinit(alloc);
     var total: usize = 0;
     for (envp) |e| total += e.len + 1;
@@ -553,7 +553,7 @@ pub fn execImage(p: *Process, data: []const u8, argv: []const []const u8, envp: 
 pub fn exitProcess(p: *Process, status: u32) noreturn {
     vfs.closeAll(p);
     p.vmas.deinit(alloc);
-    p.vmas = .{};
+    p.vmas = .empty;
     p.space.clearUser();
     p.exit_status = status;
     p.alarm_ns = 0;

@@ -1,8 +1,8 @@
 const std = @import("std");
-const posix = std.posix;
-pub fn main() !void {
-    var args = std.process.args();
-    _ = args.next();
+const sys = @import("lib/sys.zig");
+pub fn main(init: std.process.Init.Minimal) !void {
+    var args = sys.args(init);
+    args.skip();
     var n: usize = 10;
     var file: ?[]const u8 = null;
     while (args.next()) |a| {
@@ -12,16 +12,16 @@ pub fn main() !void {
             n = std.fmt.parseInt(usize, a[1..], 10) catch 10;
         } else file = a;
     }
-    const fd = if (file) |f| try posix.open(f, .{}, 0) else 0;
+    const fd = if (file) |f| try sys.open(f, sys.O.RDONLY, 0) else 0;
     var buf: [4096]u8 = undefined;
     var lines: usize = 0;
     while (lines < n) {
-        const r = try posix.read(fd, &buf);
+        const r = try sys.check(sys.read(fd, &buf));
         if (r == 0) break;
         var end: usize = 0;
         while (end < r and lines < n) : (end += 1) {
             if (buf[end] == '\n') lines += 1;
         }
-        _ = try posix.write(1, buf[0..end]);
+        try sys.writeAll(1, buf[0..end]);
     }
 }

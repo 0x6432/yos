@@ -1,19 +1,18 @@
 const std = @import("std");
-const posix = std.posix;
+const sys = @import("lib/sys.zig");
 
-fn copy(fd: posix.fd_t) !void {
+fn copy(fd: sys.fd_t) !void {
     var buf: [4096]u8 = undefined;
     while (true) {
-        const n = try posix.read(fd, &buf);
+        const n = try sys.check(sys.read(fd, &buf));
         if (n == 0) return;
-        var off: usize = 0;
-        while (off < n) off += try posix.write(1, buf[off..n]);
+        try sys.writeAll(1, buf[0..n]);
     }
 }
 
-pub fn main() !void {
-    var args = std.process.args();
-    _ = args.next();
+pub fn main(init: std.process.Init.Minimal) !void {
+    var args = sys.args(init);
+    args.skip();
     var any = false;
     var status: u8 = 0;
     while (args.next()) |a| {
@@ -22,14 +21,17 @@ pub fn main() !void {
             try copy(0);
             continue;
         }
-        const fd = posix.open(a, .{}, 0) catch {
-            std.io.getStdErr().writer().print("cat: {s}: No such file or directory\n", .{a}) catch {};
+        const fd = sys.open(a, sys.O.RDONLY, 0) catch {
+            sys.eprint("cat: {s}: {s}\n", .{ a, sys.strerror(sys.last_errno) });
             status = 1;
             continue;
         };
-        defer posix.close(fd);
-        try copy(fd);
+        defer sys.close(fd);
+        copy(fd) catch {
+            sys.eprint("cat: {s}: {s}\n", .{ a, sys.strerror(sys.last_errno) });
+            status = 1;
+        };
     }
     if (!any) try copy(0);
-    std.process.exit(status);
+    sys.exit(status);
 }

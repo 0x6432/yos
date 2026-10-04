@@ -91,14 +91,14 @@ fn fxsave(buf: *[512]u8) void {
     asm volatile ("fxsave64 (%[b])"
         :
         : [b] "r" (buf),
-        : "memory"
+        : .{ .memory = true }
     );
 }
 fn fxrstor(buf: *const [512]u8) void {
     asm volatile ("fxrstor64 (%[b])"
         :
         : [b] "r" (buf),
-        : "memory"
+        : .{ .memory = true }
     );
 }
 

@@ -54,8 +54,8 @@ pub const Node = struct {
     nlink: u32 = 1,
     parent: ?*Node = null,
     name: []u8 = &.{},
-    children: std.ArrayListUnmanaged(*Node) = .{},
-    data: std.ArrayListUnmanaged(u8) = .{},
+    children: std.ArrayList(*Node) = .empty,
+    data: std.ArrayList(u8) = .empty,
     /// initrd-backed content until first write (copy on write)
     ro_data: ?[]const u8 = null,
     link: []u8 = &.{},

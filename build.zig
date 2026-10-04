@@ -17,24 +17,27 @@ pub fn build(b: *std.Build) void {
     const target = b.resolveTargetQuery(query);
     const optimize = b.standardOptimizeOption(.{});
 
-    const kernel = b.addExecutable(.{
-        .name = "kernel",
+    const mod = b.createModule(.{
         .root_source_file = b.path("kernel/src/main.zig"),
         .target = target,
         .optimize = optimize,
         .code_model = .kernel,
+        .red_zone = false,
+        .omit_frame_pointer = false,
+        .pic = false,
     });
-    kernel.root_module.red_zone = false;
-    kernel.root_module.omit_frame_pointer = false;
-    kernel.root_module.pic = false;
-    kernel.want_lto = false;
+    const kernel = b.addExecutable(.{
+        .name = "kernel",
+        .root_module = mod,
+    });
+    kernel.lto = .none;
     kernel.entry = .{ .symbol_name = "kmain" };
     kernel.setLinkerScript(b.path("kernel/linker.ld"));
-    kernel.addAssemblyFile(b.path("kernel/src/arch/entry.S"));
+    mod.addAssemblyFile(b.path("kernel/src/arch/entry.S"));
 
     // uACPI
-    kernel.addIncludePath(b.path("third_party/uacpi/include"));
-    kernel.addCSourceFiles(.{
+    mod.addIncludePath(b.path("third_party/uacpi/include"));
+    mod.addCSourceFiles(.{
         .root = b.path("third_party/uacpi/source"),
         .files = &.{
             "default_handlers.c", "event.c",    "interpreter.c", "io.c",

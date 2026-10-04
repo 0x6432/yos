@@ -1,6 +1,5 @@
-const std = @import("std");
-pub fn main() !void {
-    const linux = std.os.linux;
-    std.io.getStdOut().writer().print("Powering off...\n", .{}) catch {};
-    _ = linux.reboot(.MAGIC1, .MAGIC2, .POWER_OFF, null);
+const sys = @import("lib/sys.zig");
+pub fn main() void {
+    sys.print("Powering off...\n", .{});
+    _ = sys.sys(.reboot, .{ @as(u32, 0xfee1dead), @as(u32, 672274793), @as(u32, 0x4321fedc), @as(usize, 0) });
 }

@@ -29,11 +29,15 @@ fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
     cpu.cli();
     log.print("\n!!! KERNEL PANIC: {s}\n", .{msg});
     if (first_trace_addr) |a| log.print("    at 0x{x}\n", .{a});
-    var it = std.debug.StackIterator.init(@returnAddress(), @frameAddress());
+    // walk the frame-pointer chain (kernel is built with frame pointers)
+    var fp: usize = @frameAddress();
     var n: usize = 0;
-    while (it.next()) |ra| : (n += 1) {
-        if (n > 16) break;
-        log.print("    #{d}: 0x{x}\n", .{ n, ra });
+    while (fp != 0 and fp % 8 == 0 and fp >= 0xffff800000000000 and n <= 16) : (n += 1) {
+        const frame: *const [2]usize = @ptrFromInt(fp);
+        if (frame[1] == 0) break;
+        log.print("    #{d}: 0x{x}\n", .{ n, frame[1] });
+        if (frame[0] <= fp) break;
+        fp = frame[0];
     }
     cpu.halt();
 }

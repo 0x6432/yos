@@ -40,10 +40,10 @@ pub inline fn inl(port: u16) u32 {
 }
 
 pub inline fn cli() void {
-    asm volatile ("cli" ::: "memory");
+    asm volatile ("cli" ::: .{ .memory = true });
 }
 pub inline fn sti() void {
-    asm volatile ("sti" ::: "memory");
+    asm volatile ("sti" ::: .{ .memory = true });
 }
 pub inline fn hlt() void {
     asm volatile ("hlt");
@@ -56,7 +56,7 @@ pub inline fn readFlags() u64 {
     return asm volatile ("pushfq; popq %[r]"
         : [r] "=r" (-> u64),
         :
-        : "memory"
+        : .{ .memory = true }
     );
 }
 pub inline fn interruptsEnabled() bool {
@@ -93,7 +93,7 @@ pub inline fn writeCr3(v: u64) void {
     asm volatile ("mov %[v], %%cr3"
         :
         : [v] "r" (v),
-        : "memory"
+        : .{ .memory = true }
     );
 }
 pub inline fn readCr0() u64 {
@@ -105,7 +105,7 @@ pub inline fn writeCr0(v: u64) void {
     asm volatile ("mov %[v], %%cr0"
         :
         : [v] "r" (v),
-        : "memory"
+        : .{ .memory = true }
     );
 }
 pub inline fn readCr4() u64 {
@@ -117,14 +117,14 @@ pub inline fn writeCr4(v: u64) void {
     asm volatile ("mov %[v], %%cr4"
         :
         : [v] "r" (v),
-        : "memory"
+        : .{ .memory = true }
     );
 }
 pub inline fn invlpg(addr: u64) void {
     asm volatile ("invlpg (%[a])"
         :
         : [a] "r" (addr),
-        : "memory"
+        : .{ .memory = true }
     );
 }
 

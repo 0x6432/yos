@@ -38,7 +38,7 @@ Each milestone is a git tag `mN` pushed to GitHub plus a tarball backup in `back
 
 - **M8 – COW fork**: shared frames with refcounts, write faults copy on demand. ✅
 - **M9 – full signals**: stop/continue job control, siginfo, sigaltstack, RT signal queueing, alarm/itimer, sigtimedwait, waitid, SA_RESTART/ERESTARTSYS, SIGTTIN, SIGCHLD auto-reap. ✅
-- **M10 – Zig 0.16.0**: port build system, kernel, and userland.
+- **M10 – Zig 0.16.0**: port build system (root_module), kernel (Io.Writer logging, unmanaged ArrayList, asm clobber structs, own frame-pointer unwinder), userland rewritten on a tiny raw-syscall runtime (`userland/lib/sys.zig`). ✅
 - **M11 – SMP**: Limine MP boot, per-CPU data/GDT/TSS/LAPIC timer, shared run queue, big kernel lock.
 - **M12 – VFS + ext2**: inode-ops VFS with mounts, ramfs/devfs/ext2 drivers, virtio-blk, block cache, ext2 root.
 

@@ -1,12 +1,12 @@
 const std = @import("std");
-const posix = std.posix;
+const sys = @import("lib/sys.zig");
 
 fn modeStr(m: u32, buf: *[10]u8) []const u8 {
-    buf[0] = switch (m & 0o170000) {
-        0o040000 => 'd',
-        0o120000 => 'l',
-        0o020000 => 'c',
-        0o010000 => 'p',
+    buf[0] = switch (m & sys.S.IFMT) {
+        sys.S.IFDIR => 'd',
+        sys.S.IFLNK => 'l',
+        sys.S.IFCHR => 'c',
+        sys.S.IFIFO => 'p',
         else => '-',
     };
     const chars = "rwxrwxrwx";
@@ -14,10 +14,12 @@ fn modeStr(m: u32, buf: *[10]u8) []const u8 {
     return buf;
 }
 
-pub fn main() !void {
-    var args = std.process.args();
-    _ = args.next();
-    const w = std.io.getStdOut().writer();
+var name_store: [64 * 1024]u8 = undefined;
+var names: [2048][]const u8 = undefined;
+
+pub fn main(init: std.process.Init.Minimal) !void {
+    var args = sys.args(init);
+    args.skip();
     var long = false;
     var all = false;
     var paths: [16][]const u8 = undefined;
@@ -40,46 +42,56 @@ pub fn main() !void {
     }
     var status: u8 = 0;
     for (paths[0..np]) |path| {
-        var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch {
-            // maybe a file
-            if (std.fs.cwd().statFile(path)) |_| {
-                try w.print("{s}\n", .{path});
-            } else |_| {
-                std.io.getStdErr().writer().print("ls: cannot access '{s}': No such file or directory\n", .{path}) catch {};
-                status = 2;
-            }
+        var st: sys.Stat = undefined;
+        if (sys.stat(path, &st) < 0) {
+            sys.eprint("ls: cannot access '{s}': No such file or directory\n", .{path});
+            status = 2;
+            continue;
+        }
+        if (!sys.S.isDir(st.mode)) {
+            sys.bprint("{s}\n", .{path});
+            continue;
+        }
+        var dir = sys.Dir.open(path) catch {
+            sys.eprint("ls: cannot open '{s}'\n", .{path});
+            status = 2;
             continue;
         };
         defer dir.close();
-        if (np > 1) try w.print("{s}:\n", .{path});
-        var names = std.ArrayList([]const u8).init(std.heap.page_allocator);
-        var it = dir.iterate();
-        while (try it.next()) |e| {
+        if (np > 1) sys.bprint("{s}:\n", .{path});
+        var nn: usize = 0;
+        var used: usize = 0;
+        while (try dir.next()) |e| {
             if (!all and e.name[0] == '.') continue;
-            try names.append(try std.heap.page_allocator.dupe(u8, e.name));
+            if (nn == names.len or used + e.name.len > name_store.len) break;
+            @memcpy(name_store[used..][0..e.name.len], e.name);
+            names[nn] = name_store[used..][0..e.name.len];
+            used += e.name.len;
+            nn += 1;
         }
-        std.mem.sort([]const u8, names.items, {}, struct {
+        std.mem.sort([]const u8, names[0..nn], {}, struct {
             fn lt(_: void, a: []const u8, b: []const u8) bool {
                 return std.mem.lessThan(u8, a, b);
             }
         }.lt);
-        for (names.items) |n| {
+        for (names[0..nn]) |n| {
             if (long) {
-                var st: std.os.linux.Stat = undefined;
                 var pbuf: [512]u8 = undefined;
-                const full = try std.fmt.bufPrintZ(&pbuf, "{s}/{s}", .{ path, n });
-                _ = std.os.linux.lstat(full, &st);
+                const full = std.fmt.bufPrint(&pbuf, "{s}/{s}", .{ path, n }) catch continue;
+                var ls: sys.Stat = std.mem.zeroes(sys.Stat);
+                _ = sys.lstat(full, &ls);
                 var mb: [10]u8 = undefined;
-                try w.print("{s} {d:>3} root root {d:>8} {s}", .{ modeStr(st.mode, &mb), st.nlink, st.size, n });
-                if (st.mode & 0o170000 == 0o120000) {
+                sys.bprint("{s} {d:>3} root root {d:>8} {s}", .{ modeStr(ls.mode, &mb), ls.nlink, ls.size, n });
+                if (ls.mode & sys.S.IFMT == sys.S.IFLNK) {
                     var lb: [256]u8 = undefined;
-                    if (posix.readlink(full, &lb)) |l| try w.print(" -> {s}", .{l}) else |_| {}
+                    if (sys.readlink(full, &lb)) |l| sys.bprint(" -> {s}", .{l}) else |_| {}
                 }
-                try w.print("\n", .{});
+                sys.bprint("\n", .{});
             } else {
-                try w.print("{s}\n", .{n});
+                sys.bprint("{s}\n", .{n});
             }
         }
     }
-    std.process.exit(status);
+    sys.flush();
+    sys.exit(status);
 }

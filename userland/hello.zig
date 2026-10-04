@@ -1,7 +1,5 @@
-const std = @import("std");
-const linux = std.os.linux;
+const sys = @import("lib/sys.zig");
 
-pub fn main() !void {
-    const out = std.io.getStdOut().writer();
-    try out.print("Hello from userspace! pid={d}\n", .{linux.getpid()});
+pub fn main() void {
+    sys.print("Hello from userspace! pid={d}\n", .{sys.getpid()});
 }

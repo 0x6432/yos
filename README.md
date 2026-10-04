@@ -39,7 +39,7 @@ bg-done
 See [PLAN.md](PLAN.md) for the design and milestones (`m0`..`m7` git tags).
 
 ## Requirements
-- Zig 0.14.1, make, xorriso, gcc (Limine host tool + bash build helpers), curl
+- Zig 0.16.0, make, xorriso, gcc (Limine host tool + bash build helpers), curl
 - qemu-system-x86_64
 
 ## Build & run

@@ -1,11 +1,13 @@
 const std = @import("std");
-pub fn main() !void {
-    const u = std.posix.uname();
-    var args = std.process.args();
-    _ = args.next();
-    const w = std.io.getStdOut().writer();
+const sys = @import("lib/sys.zig");
+pub fn main(init: std.process.Init.Minimal) void {
+    var un: sys.Utsname = undefined;
+    _ = sys.uname(&un);
+    var args = sys.args(init);
+    args.skip();
     const all = if (args.next()) |a| std.mem.eql(u8, a, "-a") else false;
+    const z = std.mem.sliceTo;
     if (all) {
-        try w.print("{s} {s} {s} {s} {s}\n", .{ std.mem.sliceTo(&u.sysname, 0), std.mem.sliceTo(&u.nodename, 0), std.mem.sliceTo(&u.release, 0), std.mem.sliceTo(&u.version, 0), std.mem.sliceTo(&u.machine, 0) });
-    } else try w.print("{s}\n", .{std.mem.sliceTo(&u.sysname, 0)});
+        sys.print("{s} {s} {s} {s} {s}\n", .{ z(&un.sysname, 0), z(&un.nodename, 0), z(&un.release, 0), z(&un.version, 0), z(&un.machine, 0) });
+    } else sys.print("{s}\n", .{z(&un.sysname, 0)});
 }
