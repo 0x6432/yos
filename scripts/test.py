@@ -24,6 +24,14 @@ STEPS = [
     ("sleep 30", "\x03"),
     ("# ", "echo interrupted-ok; sleep 0.2 & wait; echo bg-done\n"),
     ("bg-done", None),
+    ("# ", "sleep 2\n"),
+    ("sleep 2", "\x1a"),
+    ("Stopped", None),
+    ("# ", "jobs; fg; echo fg-done-$?\n"),
+    ("fg-done-0", None),
+    ("# ", "sleep 5 & kill -STOP %1; sleep 0.1; jobs; kill -CONT %1; kill %1; wait; echo killed-$?\n"),
+    ("Terminated", None),
+    ("killed-", None),
     ("# ", "exit\n"),
     ("init exited", None),
 ]
@@ -34,11 +42,12 @@ def main():
                           "-display", "none", "-no-reboot"],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     buf = b""
+    pos = 0
     ok = True
     try:
         for expect, send in STEPS:
             deadline = time.time() + timeout
-            start = len(buf)
+            start = pos
             while expect.encode() not in buf[start:] and b"KERNEL PANIC" not in buf:
                 r, _, _ = select.select([p.stdout], [], [], 0.2)
                 if r:
@@ -53,6 +62,7 @@ def main():
                 print(f"\n[test] FAILED waiting for {expect!r}")
                 ok = False
                 break
+            pos = buf.index(expect.encode(), start) + len(expect)
             if send is not None:
                 time.sleep(0.3)
                 for ch in send.encode():

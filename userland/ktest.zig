@@ -172,9 +172,211 @@ pub fn main() !void {
         }
         check(ok, "20 sequential fork/wait");
     }
+    // ---- full signals (M9) ----
+    try signalTests();
     if (failures == 0) {
         out("[ktest] ALL {d} TESTS PASSED\n", .{passed});
     } else {
         out("[ktest] {d} FAILED, {d} passed\n", .{ failures, passed });
+    }
+}
+
+// ------------------------------------------------------------------
+// M9 signal tests (raw syscalls)
+// ------------------------------------------------------------------
+var si_code: i32 = -100;
+var si_pid: i32 = -1;
+var si_value: i32 = 0;
+var rt_count: u32 = 0;
+var usr2_count: u32 = 0;
+var alt_addr: usize = 0;
+var alrm: u32 = 0;
+var altstack_buf: [32768]u8 align(16) = undefined;
+
+fn infoHandler(sig: i32, info: *const linux.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+    _ = sig;
+    const raw: *const [8]i32 = @ptrCast(@alignCast(info));
+    si_code = raw[2];
+    si_pid = raw[4];
+    si_value = raw[6];
+}
+fn rtHandler(_: i32) callconv(.c) void {
+    rt_count += 1;
+}
+fn usr2Handler(_: i32) callconv(.c) void {
+    usr2_count += 1;
+}
+fn altHandler(_: i32) callconv(.c) void {
+    var x: u8 = 0;
+    alt_addr = @intFromPtr(&x);
+    std.mem.doNotOptimizeAway(&x);
+}
+fn alrmHandler(_: i32) callconv(.c) void {
+    alrm += 1;
+}
+
+fn setHandler(sig: u6, h: ?*const fn (i32) callconv(.c) void, flags: u32) void {
+    var sa = posix.Sigaction{ .handler = .{ .handler = h }, .mask = posix.empty_sigset, .flags = flags };
+    posix.sigaction(sig, &sa, null);
+}
+fn mask(how: usize, sig: u32) void {
+    var set: u64 = @as(u64, 1) << @intCast(sig - 1);
+    _ = linux.syscall4(.rt_sigprocmask, how, @intFromPtr(&set), 0, 8);
+}
+fn errno(rc: usize) linux.E {
+    return linux.E.init(rc);
+}
+fn sleepMs(ms: u64) void {
+    posix.nanosleep(0, ms * 1_000_000);
+}
+fn wait4(pid: i32, status: *u32, opts: u32) isize {
+    return @bitCast(linux.syscall4(.wait4, @as(usize, @bitCast(@as(isize, pid))), @intFromPtr(status), opts, 0));
+}
+
+fn signalTests() !void {
+    const me = linux.getpid();
+    // SA_SIGINFO: si_code / si_pid from kill()
+    {
+        var sa = posix.Sigaction{ .handler = .{ .sigaction = infoHandler }, .mask = posix.empty_sigset, .flags = posix.SA.SIGINFO };
+        posix.sigaction(posix.SIG.USR1, &sa, null);
+        _ = linux.kill(me, posix.SIG.USR1);
+        check(si_code == 0 and si_pid == me, "SA_SIGINFO si_code=SI_USER, si_pid");
+        // rt_sigqueueinfo carries a value
+        var info = std.mem.zeroes([32]i32);
+        info[0] = posix.SIG.USR1;
+        info[2] = -1; // SI_QUEUE
+        info[4] = me;
+        info[6] = 1234;
+        _ = linux.syscall3(.rt_sigqueueinfo, @intCast(me), posix.SIG.USR1, @intFromPtr(&info));
+        check(si_code == -1 and si_value == 1234, "rt_sigqueueinfo SI_QUEUE + value");
+        setHandler(posix.SIG.USR1, handler, 0);
+    }
+    // standard signals coalesce, real-time signals queue
+    {
+        const RT: u6 = 40;
+        setHandler(RT, rtHandler, 0);
+        setHandler(posix.SIG.USR2, usr2Handler, 0);
+        mask(0, RT);
+        mask(0, posix.SIG.USR2);
+        _ = linux.kill(me, RT);
+        _ = linux.kill(me, RT);
+        _ = linux.kill(me, RT);
+        _ = linux.kill(me, posix.SIG.USR2);
+        _ = linux.kill(me, posix.SIG.USR2);
+        var pend: u64 = 0;
+        _ = linux.syscall2(.rt_sigpending, @intFromPtr(&pend), 8);
+        const pend_ok = pend & (1 << (RT - 1)) != 0 and pend & (1 << (posix.SIG.USR2 - 1)) != 0;
+        mask(1, RT);
+        mask(1, posix.SIG.USR2);
+        check(pend_ok and rt_count == 3 and usr2_count == 1, "RT signals queue, standard coalesce");
+    }
+    // sigaltstack + SA_ONSTACK
+    {
+        const ss = [3]u64{ @intFromPtr(&altstack_buf), 0, altstack_buf.len };
+        const rc = linux.syscall2(.sigaltstack, @intFromPtr(&ss), 0);
+        setHandler(posix.SIG.USR2, altHandler, posix.SA.ONSTACK);
+        _ = linux.kill(me, posix.SIG.USR2);
+        const base = @intFromPtr(&altstack_buf);
+        var old: [3]u64 = undefined;
+        _ = linux.syscall2(.sigaltstack, 0, @intFromPtr(&old));
+        check(rc == 0 and alt_addr >= base and alt_addr < base + altstack_buf.len and old[0] == base, "sigaltstack / SA_ONSTACK");
+        const dis = [3]u64{ 0, 2, 0 };
+        _ = linux.syscall2(.sigaltstack, @intFromPtr(&dis), 0);
+        setHandler(posix.SIG.USR2, posix.SIG.DFL, 0);
+    }
+    // rt_sigtimedwait
+    {
+        mask(0, posix.SIG.USR1);
+        _ = linux.kill(me, posix.SIG.USR1);
+        var set: u64 = 1 << (posix.SIG.USR1 - 1);
+        var info = std.mem.zeroes([32]i32);
+        const ts = linux.timespec{ .sec = 1, .nsec = 0 };
+        const r1 = linux.syscall4(.rt_sigtimedwait, @intFromPtr(&set), @intFromPtr(&info), @intFromPtr(&ts), 8);
+        const ts2 = linux.timespec{ .sec = 0, .nsec = 30_000_000 };
+        const r2 = linux.syscall4(.rt_sigtimedwait, @intFromPtr(&set), 0, @intFromPtr(&ts2), 8);
+        mask(1, posix.SIG.USR1);
+        check(r1 == posix.SIG.USR1 and info[4] == me and errno(r2) == .AGAIN, "rt_sigtimedwait (hit + timeout)");
+    }
+    // alarm / setitimer -> SIGALRM
+    {
+        setHandler(posix.SIG.ALRM, alrmHandler, 0);
+        const it = [4]i64{ 0, 0, 0, 50_000 };
+        _ = linux.syscall3(.setitimer, 0, @intFromPtr(&it), 0);
+        _ = linux.pause();
+        const a0 = linux.syscall1(.alarm, 5);
+        const a1 = linux.syscall1(.alarm, 0);
+        check(alrm == 1 and a0 == 0 and a1 == 5, "setitimer/alarm -> SIGALRM");
+    }
+    // SA_RESTART vs EINTR on a blocking pipe read
+    {
+        var fds: [2]i32 = undefined;
+        _ = linux.pipe(&fds);
+        var results: [2]bool = undefined;
+        for ([_]u32{ posix.SA.RESTART, 0 }, 0..) |fl, i| {
+            got_signal = 0;
+            setHandler(posix.SIG.USR1, handler, fl);
+            const pid = try posix.fork();
+            if (pid == 0) {
+                sleepMs(40);
+                _ = linux.kill(linux.getppid(), posix.SIG.USR1);
+                sleepMs(40);
+                _ = linux.write(fds[1], "x", 1);
+                linux.exit(0);
+            }
+            var b: [1]u8 = undefined;
+            const r = linux.read(fds[0], &b, 1);
+            if (fl != 0) {
+                results[i] = r == 1 and got_signal == posix.SIG.USR1;
+            } else {
+                results[i] = errno(r) == .INTR and got_signal == posix.SIG.USR1;
+                _ = linux.read(fds[0], &b, 1);
+            }
+            _ = posix.waitpid(pid, 0);
+        }
+        _ = linux.close(fds[0]);
+        _ = linux.close(fds[1]);
+        check(results[0], "SA_RESTART restarts pipe read");
+        check(results[1], "no SA_RESTART -> EINTR");
+        setHandler(posix.SIG.USR1, handler, 0);
+    }
+    // stop / continue with WUNTRACED / WCONTINUED
+    {
+        const pid = try posix.fork();
+        if (pid == 0) {
+            while (true) _ = linux.pause();
+        }
+        sleepMs(20);
+        var st: u32 = 0;
+        _ = linux.kill(pid, posix.SIG.STOP);
+        const r1 = wait4(pid, &st, 2); // WUNTRACED
+        const stopped = r1 == pid and posix.W.IFSTOPPED(st) and posix.W.STOPSIG(st) == posix.SIG.STOP;
+        _ = linux.kill(pid, posix.SIG.CONT);
+        const r2 = wait4(pid, &st, 8); // WCONTINUED
+        const cont = r2 == pid and st == 0xffff;
+        _ = linux.kill(pid, posix.SIG.TSTP);
+        const r3 = wait4(pid, &st, 2);
+        const tstp = r3 == pid and posix.W.IFSTOPPED(st) and posix.W.STOPSIG(st) == posix.SIG.TSTP;
+        _ = linux.kill(pid, posix.SIG.KILL);
+        const r4 = wait4(pid, &st, 0);
+        check(stopped and cont, "SIGSTOP/SIGCONT + WUNTRACED/WCONTINUED");
+        check(tstp and r4 == pid and posix.W.IFSIGNALED(st) and posix.W.TERMSIG(st) == posix.SIG.KILL, "SIGTSTP stop, SIGKILL while stopped");
+    }
+    // waitid
+    {
+        const pid = try posix.fork();
+        if (pid == 0) linux.exit(7);
+        var info = std.mem.zeroes([32]i32);
+        const r = linux.syscall5(.waitid, 1, @intCast(pid), @intFromPtr(&info), 4, 0); // P_PID, WEXITED
+        check(r == 0 and info[0] == posix.SIG.CHLD and info[2] == 1 and info[4] == pid and info[6] == 7, "waitid(P_PID) siginfo");
+    }
+    // SIGCHLD = SIG_IGN -> children are auto-reaped
+    {
+        setHandler(posix.SIG.CHLD, posix.SIG.IGN, 0);
+        const pid = try posix.fork();
+        if (pid == 0) linux.exit(3);
+        var st: u32 = 0;
+        const r = wait4(-1, &st, 0);
+        setHandler(posix.SIG.CHLD, posix.SIG.DFL, 0);
+        check(r == -@as(isize, @intFromEnum(linux.E.CHILD)), "SIGCHLD SIG_IGN auto-reap (ECHILD)");
     }
 }

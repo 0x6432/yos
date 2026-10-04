@@ -304,7 +304,7 @@ fn pipeRead(f: *File, buf: []u8) isize {
     while (p.len == 0) {
         if (p.writers == 0) return 0;
         if (f.flags & O_NONBLOCK != 0) return -E.EAGAIN;
-        if (signal.hasPending()) return -E.EINTR;
+        if (signal.hasPending()) return -signal.ERESTARTSYS;
         p.wq.waitLocked();
     }
     var n: usize = 0;
@@ -331,7 +331,7 @@ fn pipeWrite(f: *File, buf: []const u8) isize {
         }
         if (p.len == p.buf.len) {
             if (f.flags & O_NONBLOCK != 0) return if (n > 0) @intCast(n) else -E.EAGAIN;
-            if (signal.hasPending()) return if (n > 0) @intCast(n) else -E.EINTR;
+            if (signal.hasPending()) return if (n > 0) @intCast(n) else -signal.ERESTARTSYS;
             p.wq.wakeAll();
             p.wq.waitLocked();
             continue;

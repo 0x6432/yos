@@ -59,6 +59,15 @@ pub const Process = struct {
     utime_ticks: u64 = 0,
     start_tick: u64 = 0,
     reaped_children_ticks: u64 = 0,
+    // job control / wait reporting
+    stopped: bool = false,
+    stop_sig: u32 = 0,
+    wait_event: enum { none, stopped, continued } = .none,
+    /// reaped by the kernel instead of the parent (SIGCHLD ignored)
+    autoreap: bool = false,
+    // ITIMER_REAL
+    alarm_ns: u64 = 0,
+    alarm_interval_ns: u64 = 0,
 
     // ---------------- VMAs ----------------
     pub fn findVma(self: *Process, addr: u64) ?*Vma {
@@ -305,21 +314,27 @@ fn onException(frame: *idt.TrapFrame) bool {
             }
         }
         if (!frame.fromUser()) return false;
-        log.print("[yos] pid {d} ({s}): segfault at 0x{x} rip=0x{x} err={x}\n", .{ p.pid, std.mem.sliceTo(&p.name, 0), addr, frame.rip, frame.error_code });
-        signal.forceSignal(p, signal.SIGSEGV);
+        if (debug_faults) log.print("[yos] pid {d} ({s}): segfault at 0x{x} rip=0x{x} err={x}\n", .{ p.pid, std.mem.sliceTo(&p.name, 0), addr, frame.rip, frame.error_code });
+        const code = if (present) signal.SEGV_ACCERR else signal.SEGV_MAPERR;
+        signal.forceSignal(p, signal.SigInfo.fault(signal.SIGSEGV, code, addr));
         return true;
     }
     if (!frame.fromUser()) return false;
-    const sig: u32 = switch (frame.vector) {
-        0, 16, 19 => signal.SIGFPE,
-        6 => signal.SIGILL,
-        3 => signal.SIGTRAP,
-        else => signal.SIGSEGV,
+    const sig: u32, const code: i32 = switch (frame.vector) {
+        0 => .{ signal.SIGFPE, 1 }, // FPE_INTDIV
+        16, 19 => .{ signal.SIGFPE, 0 },
+        6 => .{ signal.SIGILL, 2 }, // ILL_ILLOPN
+        1, 3 => .{ signal.SIGTRAP, 1 }, // TRAP_BRKPT
+        17 => .{ signal.SIGBUS, 1 },
+        else => .{ signal.SIGSEGV, signal.SI_KERNEL },
     };
-    log.print("[yos] pid {d} ({s}): exception {d} at rip=0x{x}\n", .{ p.pid, std.mem.sliceTo(&p.name, 0), frame.vector, frame.rip });
-    signal.forceSignal(p, sig);
+    if (debug_faults) log.print("[yos] pid {d} ({s}): exception {d} at rip=0x{x}\n", .{ p.pid, std.mem.sliceTo(&p.name, 0), frame.vector, frame.rip });
+    signal.forceSignal(p, signal.SigInfo.fault(sig, code, frame.rip));
     return true;
 }
+
+/// Log user faults to the console (signals are delivered either way).
+pub var debug_faults = false;
 
 pub fn init() void {
     idt.exception_hook = onException;
@@ -541,6 +556,7 @@ pub fn exitProcess(p: *Process, status: u32) noreturn {
     p.vmas = .{};
     p.space.clearUser();
     p.exit_status = status;
+    p.alarm_ns = 0;
     // reparent children to init (pid 1)
     const init_p = byPid(1);
     for (procs.items) |c| {
@@ -551,10 +567,13 @@ pub fn exitProcess(p: *Process, status: u32) noreturn {
         }
     }
     p.zombie = true;
+    p.stopped = false;
     if (p.parent) |par| {
-        signal.sendSignal(par, signal.SIGCHLD);
-        par.child_wait.wakeAll();
-    }
+        const a = par.sig.actions[signal.SIGCHLD];
+        if (a.handler == signal.SIG_IGN or a.flags & signal.SA_NOCLDWAIT != 0) p.autoreap = true;
+        const killed = status & 0x7f != 0;
+        signal.notifyParent(p, if (killed) signal.CLD_KILLED else signal.CLD_EXITED, @intCast(if (killed) status & 0x7f else (status >> 8) & 0xff));
+    } else p.autoreap = true;
     if (p.pid == 1) {
         log.print("\n[yos] init exited with status 0x{x}\n", .{status});
         @import("acpi.zig").poweroff();
@@ -571,4 +590,17 @@ pub fn reap(p: *Process) void {
     p.space.destroy();
     sched.freeThread(p.thread);
     alloc.destroy(p);
+}
+
+/// Reap zombies nobody will wait for (parent ignores SIGCHLD).
+pub fn reapOrphans() void {
+    var i: usize = 0;
+    while (i < procs.items.len) {
+        const p = procs.items[i];
+        if (p.zombie and p.autoreap and p.thread.state == .zombie and p.thread.kstack_phys == 0) {
+            reap(p);
+            continue;
+        }
+        i += 1;
+    }
 }

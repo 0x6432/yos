@@ -151,9 +151,18 @@ fn onIrq(_: ?*anyopaque) void {
 fn ttyRead(f: *vfs.File, buf: []u8) isize {
     const e = cpu.saveDisable();
     defer cpu.restore(e);
+    // background process group reading the terminal: SIGTTIN
+    if (proc.currentOrNull()) |p| {
+        if (fg_pgrp != 0 and p.pgid != fg_pgrp) {
+            const a = p.sig.actions[signal.SIGTTIN];
+            if (a.handler == signal.SIG_IGN or p.sig.blocked & signal.bit(signal.SIGTTIN) != 0) return -E.EIO;
+            _ = signal.sendGroup(p.pgid, signal.SIGTTIN);
+            return -signal.ERESTARTSYS;
+        }
+    }
     while (ready_len == 0 and eof_pending == 0) {
         if (f.flags & vfs.O_NONBLOCK != 0) return -E.EAGAIN;
-        if (signal.hasPending()) return -E.EINTR;
+        if (signal.hasPending()) return -signal.ERESTARTSYS;
         // poll the UART too, in case an interrupt was lost
         onIrq(null);
         if (ready_len != 0 or eof_pending != 0) break;

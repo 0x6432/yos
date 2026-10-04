@@ -40,9 +40,11 @@ export fn syscall_dispatch(frame: *Frame) callconv(.c) void {
     const r = handle(nr, frame);
     if (trace) log.print("[sys] pid {d} {d}({x}, {x}, {x}) = {d}\n", .{ p.pid, nr, frame.rdi, frame.rsi, frame.rdx, r });
     frame.rax = @bitCast(r);
-    if (r == -E.EINTR and signal.restartable(p)) {
-        frame.rip -= 2;
-        frame.rax = nr;
+    if (r == -signal.ERESTARTSYS) {
+        if (signal.shouldRestart(p)) {
+            frame.rip -= 2;
+            frame.rax = nr;
+        } else frame.rax = @bitCast(@as(isize, -E.EINTR));
     }
     signal.deliver(frame);
 }
@@ -93,7 +95,9 @@ fn handle(nr: u64, f: *Frame) isize {
         33 => sysDup3(a0, a1, 0, true),
         34 => sysPause(),
         35 => sysNanosleep(a0, a1),
-        37 => 0, // alarm
+        36 => sysGetitimer(a0, a1),
+        37 => sysAlarm(a0),
+        38 => sysSetitimer(a0, a1, a2),
         39 => proc.current().pid,
         41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55 => -E.ENOSYS, // sockets
         56 => sysClone(f, a0, a1, a2, a3, a4),
@@ -145,7 +149,11 @@ fn handle(nr: u64, f: *Frame) isize {
         124 => sysGetsid(@truncate(@as(i64, @bitCast(a0)))),
         127 => sysSigpending(a0),
         130 => sysSigsuspend(a0),
-        131 => sysSigaltstack(a1),
+        131 => sysSigaltstack(a0, a1, f.rsp),
+        128 => sysSigtimedwait(a0, a1, a2),
+        129 => sysSigqueueinfo(@truncate(@as(i64, @bitCast(a0))), a1, a2),
+        297 => sysSigqueueinfo(@truncate(@as(i64, @bitCast(a1))), a2, a3),
+        247 => sysWaitid(a0, @truncate(@as(i64, @bitCast(a1))), a2, a3),
         132 => 0, // utime
         137, 138 => sysStatfs(a1),
         157 => 0, // prctl
@@ -153,7 +161,7 @@ fn handle(nr: u64, f: *Frame) isize {
         160 => 0, // setrlimit
         169 => sysReboot(a0, a1, a2),
         186 => proc.current().pid,
-        200 => sysKill(@truncate(@as(i64, @bitCast(a0))), a1),
+        200 => sysTkill(@truncate(@as(i64, @bitCast(a0))), a1),
         201 => blk: {
             const t = vfs.now();
             if (a0 != 0) proc.writeUser(i64, a0, t) catch break :blk -E.EFAULT;
@@ -173,7 +181,7 @@ fn handle(nr: u64, f: *Frame) isize {
         },
         230 => sysNanosleep(a2, a3),
         231 => proc.exitProcess(proc.current(), (@as(u32, @truncate(a0)) & 0xff) << 8),
-        234 => sysKill(@truncate(@as(i64, @bitCast(a1))), a2),
+        234 => sysTkill(@truncate(@as(i64, @bitCast(a1))), a2),
         257 => sysOpenat(a0, a1, a2, a3),
         258 => sysMkdirat(a0, a1, a2),
         262 => sysStatat(a0, a1, a2, a3),
@@ -1120,37 +1128,105 @@ pub fn execPath(f: *Frame, path: []const u8, argv: *std.ArrayListUnmanaged([]con
             p.cloexec.unset(i);
         }
     }
-    for (&p.sig.actions) |*a| {
-        if (a.handler > signal.SIG_IGN) a.* = .{};
-    }
+    signal.onExec(p);
     return 0;
 }
 
 const WNOHANG = 1;
 
-fn sysWait4(pid: i32, status_addr: u64, options: u64) isize {
+const WUNTRACED = 2;
+const WEXITED = 4;
+const WCONTINUED = 8;
+const WNOWAIT = 0x01000000;
+
+const WaitResult = struct { pid: i32, status: u32, code: i32, sstatus: i32 };
+
+/// Shared wait4/waitid engine. `match` selects children; returns null when
+/// nothing is ready yet, error code via `err`.
+fn waitCommon(comptime matchFn: fn (*proc.Process, *proc.Process, i64) bool, arg: i64, options: u64) union(enum) { ok: WaitResult, none, err: isize } {
     const p = proc.current();
     const e = cpu.saveDisable();
     defer cpu.restore(e);
     while (true) {
         var found = false;
         for (proc.procs.items) |c| {
-            if (c.parent != p) continue;
-            const match = if (pid > 0) c.pid == pid else if (pid == 0) c.pgid == p.pgid else if (pid == -1) true else c.pgid == -pid;
-            if (!match) continue;
+            if (c.parent != p or c.autoreap) continue;
+            if (!matchFn(p, c, arg)) continue;
             found = true;
             if (c.zombie and c.thread.state == .zombie) {
-                const cpid = c.pid;
+                if (options & WEXITED == 0) continue;
                 const st = c.exit_status;
-                proc.reap(c);
-                if (status_addr != 0) proc.writeUser(i32, status_addr, @bitCast(st)) catch return -E.EFAULT;
-                return cpid;
+                const killed = st & 0x7f != 0;
+                const res: WaitResult = .{
+                    .pid = c.pid,
+                    .status = st,
+                    .code = if (killed) signal.CLD_KILLED else signal.CLD_EXITED,
+                    .sstatus = @intCast(if (killed) st & 0x7f else (st >> 8) & 0xff),
+                };
+                if (options & WNOWAIT == 0) proc.reap(c);
+                return .{ .ok = res };
+            }
+            if (c.wait_event == .stopped and c.stopped and options & WUNTRACED != 0) {
+                if (options & WNOWAIT == 0) c.wait_event = .none;
+                return .{ .ok = .{ .pid = c.pid, .status = (c.stop_sig << 8) | 0x7f, .code = signal.CLD_STOPPED, .sstatus = @intCast(c.stop_sig) } };
+            }
+            if (c.wait_event == .continued and options & WCONTINUED != 0) {
+                if (options & WNOWAIT == 0) c.wait_event = .none;
+                return .{ .ok = .{ .pid = c.pid, .status = 0xffff, .code = signal.CLD_CONTINUED, .sstatus = signal.SIGCONT } };
             }
         }
-        if (!found) return -E.ECHILD;
-        if (options & WNOHANG != 0) return 0;
-        if (signal.hasPending()) return -E.EINTR;
+        if (!found) return .{ .err = -E.ECHILD };
+        if (options & WNOHANG != 0) return .none;
+        if (signal.hasPending()) return .{ .err = -signal.ERESTARTSYS };
         p.child_wait.waitLocked();
+    }
+}
+
+fn wait4Match(p: *proc.Process, c: *proc.Process, pid: i64) bool {
+    return if (pid > 0) c.pid == pid else if (pid == 0) c.pgid == p.pgid else if (pid == -1) true else c.pgid == -pid;
+}
+
+fn sysWait4(pid: i32, status_addr: u64, options: u64) isize {
+    if (options & ~@as(u64, WNOHANG | WUNTRACED | WCONTINUED | 0x40000000 | 0x80000000 | 0x20000000) != 0) return -E.EINVAL;
+    switch (waitCommon(wait4Match, pid, (options & 0xffff) | WEXITED)) {
+        .ok => |r| {
+            if (status_addr != 0) proc.writeUser(u32, status_addr, r.status) catch return -E.EFAULT;
+            return r.pid;
+        },
+        .none => return 0,
+        .err => |x| return x,
+    }
+}
+
+fn waitidMatch(_: *proc.Process, c: *proc.Process, arg: i64) bool {
+    const idtype = arg >> 32;
+    const id: i32 = @truncate(arg);
+    return switch (idtype) {
+        0 => true, // P_ALL
+        1 => c.pid == id, // P_PID
+        2 => c.pgid == id, // P_PGID
+        else => false,
+    };
+}
+
+fn sysWaitid(idtype: u64, id: i32, infop: u64, options: u64) isize {
+    if (idtype > 2) return -E.EINVAL;
+    if (options & (WEXITED | WUNTRACED | WCONTINUED) == 0) return -E.EINVAL;
+    const arg: i64 = (@as(i64, @intCast(idtype)) << 32) | @as(u32, @bitCast(id));
+    switch (waitCommon(waitidMatch, arg, options)) {
+        .ok => |r| {
+            if (infop != 0) {
+                var info = signal.SigInfo.kill(signal.SIGCHLD, r.code, r.pid);
+                info.f1 = @as(u32, @bitCast(r.sstatus));
+                proc.writeUser(signal.SigInfo, infop, info) catch return -E.EFAULT;
+            }
+            return 0;
+        },
+        .none => {
+            if (infop != 0) proc.writeUser(signal.SigInfo, infop, .{}) catch return -E.EFAULT;
+            return 0;
+        },
+        .err => |x| return x,
     }
 }
 
@@ -1158,10 +1234,10 @@ fn sysKill(pid: i32, sig64: u64) isize {
     const sig: u32 = @truncate(sig64);
     if (sig >= signal.NSIG) return -E.EINVAL;
     const p = proc.current();
+    const info = signal.SigInfo.kill(sig, signal.SI_USER, p.pid);
     if (pid > 0) {
         const t = proc.byPid(pid) orelse return -E.ESRCH;
-        if (t.zombie) return if (sig == 0) 0 else 0;
-        signal.sendSignal(t, sig);
+        if (sig != 0) signal.sendSignalInfo(t, sig, info);
         return 0;
     }
     const grp: i32 = if (pid == 0) p.pgid else if (pid == -1) 0 else -pid;
@@ -1171,10 +1247,31 @@ fn sysKill(pid: i32, sig64: u64) isize {
         if (pid == -1) {
             if (t.pid == 1 or t == p) continue;
         } else if (t.pgid != grp) continue;
-        signal.sendSignal(t, sig);
+        if (sig != 0) signal.sendSignalInfo(t, sig, info);
         n += 1;
     }
     return if (n == 0 and pid != -1) -E.ESRCH else 0;
+}
+
+fn sysTkill(tid: i32, sig64: u64) isize {
+    const sig: u32 = @truncate(sig64);
+    if (sig >= signal.NSIG or tid <= 0) return -E.EINVAL;
+    const t = proc.byPid(tid) orelse return -E.ESRCH;
+    if (sig != 0) signal.sendSignalInfo(t, sig, signal.SigInfo.kill(sig, signal.SI_TKILL, proc.current().pid));
+    return 0;
+}
+
+fn sysSigqueueinfo(pid: i32, sig64: u64, uinfo: u64) isize {
+    const sig: u32 = @truncate(sig64);
+    if (sig == 0 or sig >= signal.NSIG) return -E.EINVAL;
+    var info = proc.readUser(signal.SigInfo, uinfo) catch return -E.EFAULT;
+    const p = proc.current();
+    // userspace may not forge kernel-originated codes
+    if ((info.code >= 0 or info.code == signal.SI_TKILL) and proc.byPid(pid) != p) return -E.EPERM;
+    info.signo = @intCast(sig);
+    const t = proc.byPid(pid) orelse return -E.ESRCH;
+    signal.sendSignalInfo(t, sig, info);
+    return 0;
 }
 
 fn sysSetpgid(pid_in: i32, pgid_in: i32) isize {
@@ -1216,13 +1313,18 @@ fn sysGetres(a: u64, b: u64, c: u64) isize {
 // signals
 // ------------------------------------------------------------------
 fn sysSigaction(sig: u64, act: u64, oact: u64) isize {
-    if (sig == 0 or sig >= signal.NSIG or sig == signal.SIGKILL or sig == signal.SIGSTOP) return -E.EINVAL;
+    if (sig == 0 or sig >= signal.NSIG) return -E.EINVAL;
     const p = proc.current();
     if (oact != 0) proc.writeUser(signal.Action, oact, p.sig.actions[sig]) catch return -E.EFAULT;
     if (act != 0) {
-        const a = proc.readUser(signal.Action, act) catch return -E.EFAULT;
-        p.sig.actions[sig] = a;
-        if (a.handler == signal.SIG_IGN) p.sig.pending &= ~(@as(u64, 1) << @intCast(sig - 1));
+        if (sig == signal.SIGKILL or sig == signal.SIGSTOP) return -E.EINVAL;
+        var a = proc.readUser(signal.Action, act) catch return -E.EFAULT;
+        a.mask = signal.sanitizeMask(a.mask);
+        p.sig.actions[@intCast(sig)] = a;
+        const s: u32 = @intCast(sig);
+        if (a.handler == signal.SIG_IGN or (a.handler == signal.SIG_DFL and signal.defaultAction(s) == .ignore)) {
+            signal.discard(p, s);
+        }
     }
     return 0;
 }
@@ -1238,7 +1340,7 @@ fn sysSigprocmask(how: u64, set: u64, oset: u64) isize {
             2 => p.sig.blocked = s,
             else => return -E.EINVAL,
         }
-        p.sig.blocked &= ~((@as(u64, 1) << (signal.SIGKILL - 1)) | (@as(u64, 1) << (signal.SIGSTOP - 1)));
+        p.sig.blocked = signal.sanitizeMask(p.sig.blocked);
     }
     return 0;
 }
@@ -1253,19 +1355,115 @@ fn sysSigsuspend(mask_addr: u64) isize {
     const p = proc.current();
     const m = proc.readUser(u64, mask_addr) catch return -E.EFAULT;
     p.sig.saved_mask = p.sig.blocked;
-    p.sig.blocked = m;
-    while (!signal.hasPending()) sched.sleepTicks(1);
+    p.sig.blocked = signal.sanitizeMask(m);
+    signal.waitForSignal();
     return -E.EINTR;
 }
 
 fn sysPause() isize {
-    while (!signal.hasPending()) sched.sleepTicks(1);
+    signal.waitForSignal();
     return -E.EINTR;
 }
 
-fn sysSigaltstack(old: u64) isize {
-    if (old != 0) proc.writeUser([3]u64, old, .{ 0, 2, 0 }) catch return -E.EFAULT;
+fn sysSigaltstack(new: u64, old: u64, sp: u64) isize {
+    const p = proc.current();
+    const cur = p.sig.altstack;
+    if (old != 0) {
+        var o = cur;
+        o.flags = signal.altStackFlags(p, sp);
+        proc.writeUser(signal.AltStack, old, o) catch return -E.EFAULT;
+    }
+    if (new != 0) {
+        if (signal.altStackFlags(p, sp) == signal.SS_ONSTACK) return -E.EPERM;
+        const n = proc.readUser(signal.AltStack, new) catch return -E.EFAULT;
+        if (n.flags & ~(signal.SS_DISABLE | 0x80000000) != 0) return -E.EINVAL;
+        if (n.flags & signal.SS_DISABLE != 0) {
+            p.sig.altstack = .{};
+        } else {
+            if (n.size < 2048) return -E.ENOMEM; // MINSIGSTKSZ
+            p.sig.altstack = .{ .sp = n.sp, .flags = 0, .size = n.size };
+        }
+    }
     return 0;
+}
+
+fn sysSigtimedwait(set_addr: u64, info_addr: u64, ts_addr: u64) isize {
+    const p = proc.current();
+    const set = signal.sanitizeMask(proc.readUser(u64, set_addr) catch return -E.EFAULT);
+    var deadline: ?u64 = null;
+    if (ts_addr != 0) {
+        const ts = proc.readUser([2]i64, ts_addr) catch return -E.EFAULT;
+        if (ts[0] < 0 or ts[1] < 0 or ts[1] >= 1_000_000_000) return -E.EINVAL;
+        deadline = time.nanos() + @as(u64, @intCast(ts[0])) * 1_000_000_000 + @as(u64, @intCast(ts[1]));
+    }
+    while (true) {
+        const e = cpu.saveDisable();
+        const ready = p.sig.pending & set;
+        if (ready != 0) {
+            const sig: u32 = @as(u32, @ctz(ready)) + 1;
+            const info = signal.dequeue(p, sig);
+            cpu.restore(e);
+            if (info_addr != 0) proc.writeUser(signal.SigInfo, info_addr, info) catch return -E.EFAULT;
+            return sig;
+        }
+        cpu.restore(e);
+        // other unblocked signals interrupt the wait
+        if (p.sig.pending & ~p.sig.blocked & ~set != 0) return -E.EINTR;
+        if (deadline) |d| {
+            const now = time.nanos();
+            if (now >= d) return -E.EAGAIN;
+            const left = d - now;
+            if (left < 1_000_000_000 / time.HZ) sched.yield() else sched.sleepTicks(left * time.HZ / 1_000_000_000);
+        } else sched.sleepTicks(1);
+    }
+}
+
+// ---------------- interval timers ----------------
+fn nsToTimeval(ns: u64) [2]i64 {
+    return .{ @intCast(ns / 1_000_000_000), @intCast((ns % 1_000_000_000) / 1000) };
+}
+fn timevalToNs(tv: [2]i64) ?u64 {
+    if (tv[0] < 0 or tv[1] < 0 or tv[1] >= 1_000_000) return null;
+    return @as(u64, @intCast(tv[0])) * 1_000_000_000 + @as(u64, @intCast(tv[1])) * 1000;
+}
+
+fn itimerGet(p: *proc.Process) [4]i64 {
+    const now = time.nanos();
+    var left: u64 = if (p.alarm_ns == 0) 0 else p.alarm_ns -| now;
+    if (p.alarm_ns != 0 and left == 0) left = 1000;
+    const iv = nsToTimeval(p.alarm_interval_ns);
+    const v = nsToTimeval(left);
+    return .{ iv[0], iv[1], v[0], v[1] };
+}
+
+fn sysGetitimer(which: u64, cur: u64) isize {
+    if (which != 0) return if (which <= 2) 0 else -E.EINVAL; // VIRTUAL/PROF: unsupported, report disarmed
+    proc.writeUser([4]i64, cur, itimerGet(proc.current())) catch return -E.EFAULT;
+    return 0;
+}
+
+fn sysSetitimer(which: u64, new: u64, old: u64) isize {
+    if (which > 2) return -E.EINVAL;
+    const p = proc.current();
+    if (which != 0) return 0;
+    if (old != 0) proc.writeUser([4]i64, old, itimerGet(p)) catch return -E.EFAULT;
+    if (new != 0) {
+        const v = proc.readUser([4]i64, new) catch return -E.EFAULT;
+        const iv = timevalToNs(.{ v[0], v[1] }) orelse return -E.EINVAL;
+        const val = timevalToNs(.{ v[2], v[3] }) orelse return -E.EINVAL;
+        p.alarm_interval_ns = iv;
+        p.alarm_ns = if (val == 0) 0 else time.nanos() + val;
+    }
+    return 0;
+}
+
+fn sysAlarm(secs: u64) isize {
+    const p = proc.current();
+    const now = time.nanos();
+    const left = if (p.alarm_ns == 0) 0 else (p.alarm_ns -| now + 999_999_999) / 1_000_000_000;
+    p.alarm_interval_ns = 0;
+    p.alarm_ns = if (secs == 0) 0 else now + secs * 1_000_000_000;
+    return @intCast(left);
 }
 
 // ------------------------------------------------------------------
