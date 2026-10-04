@@ -13,7 +13,7 @@ North-star goal: boot to an interactive **GNU bash** prompt.
 | Console | COM1 serial (16550), IRQ-driven input |
 | Physical memory | Buddy allocator (orders 0..10, 4 KiB..4 MiB), per-page `struct Page` array |
 | Kernel heap | Slab allocator (16..2048 B size classes, 1 page slabs); large allocs go straight to buddy; exposed as `std.mem.Allocator` |
-| Virtual memory | 4-level paging, kernel half shared by all address spaces, per-process VMAs, demand-zero pages, eager copy on fork |
+| Virtual memory | 4-level paging, kernel half shared by all address spaces, per-process VMAs, demand-zero pages, copy-on-write fork |
 | ACPI | uACPI (full mode): MADT for LAPIC/IOAPIC, HPET/PM timer via namespace, S5 poweroff |
 | Interrupts | IDT + LAPIC + IOAPIC, LAPIC timer @ 100 Hz |
 | Scheduler | Preemptive round robin, kernel threads + user threads, FPU state saved with fxsave |
@@ -33,6 +33,14 @@ Each milestone is a git tag `mN` pushed to GitHub plus a tarball backup in `back
 - **M5 – userspace**: syscall entry, ELF loader, first Linux static binary (`write`/`exit`).
 - **M6 – VFS + processes**: initrd/ramfs, fd table, fork/execve/wait4, pipes, tty/termios, mmap/brk.
 - **M7 – bash**: remaining syscalls + signals needed by bash, interactive prompt over serial. ✅ done
+
+## Phase 2
+
+- **M8 – COW fork**: shared frames with refcounts, write faults copy on demand. ✅
+- **M9 – full signals**: stop/continue job control, siginfo, sigaltstack, RT signal queueing, alarm/itimer, sigtimedwait, waitid.
+- **M10 – Zig 0.16.0**: port build system, kernel, and userland.
+- **M11 – SMP**: Limine MP boot, per-CPU data/GDT/TSS/LAPIC timer, shared run queue, big kernel lock.
+- **M12 – VFS + ext2**: inode-ops VFS with mounts, ramfs/devfs/ext2 drivers, virtio-blk, block cache, ext2 root.
 
 ## Later
 SMP, COW fork, real block devices + ext2, framebuffer console, keyboard, networking.

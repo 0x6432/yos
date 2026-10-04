@@ -16,6 +16,12 @@ fn check(ok: bool, what: []const u8) void {
     out("[ktest] {s:<40} {s}\n", .{ what, if (ok) "ok" else "FAIL" });
 }
 
+fn freeRam() u64 {
+    var si: [14]u64 = undefined;
+    _ = linux.syscall1(.sysinfo, @intFromPtr(&si));
+    return si[5];
+}
+
 fn handler(sig: i32) callconv(.c) void {
     got_signal = sig;
 }
@@ -119,6 +125,32 @@ pub fn main() !void {
         @memset(big, 1);
         ga.free(big);
         check(true, "page allocator 3 MiB");
+    }
+    // ---- copy-on-write fork ----
+    {
+        const ga = std.heap.page_allocator;
+        const buf = try ga.alloc(u8, 4 << 20);
+        defer ga.free(buf);
+        @memset(buf, 0x11);
+        const free_before = freeRam();
+        const pid = try posix.fork();
+        if (pid == 0) {
+            // child: memory is shared until written
+            var ok = true;
+            for (buf) |b| if (b != 0x11) {
+                ok = false;
+            };
+            const shared_cost = free_before -| freeRam();
+            @memset(buf, 0x22);
+            linux.exit(if (ok and shared_cost < (2 << 20)) 0 else 1);
+        }
+        const r = posix.waitpid(pid, 0);
+        var intact = true;
+        for (buf) |b| if (b != 0x11) {
+            intact = false;
+        };
+        check(posix.W.EXITSTATUS(r.status) == 0, "cow: child shares pages until write");
+        check(intact, "cow: parent unaffected by child writes");
     }
     // ---- time ----
     {

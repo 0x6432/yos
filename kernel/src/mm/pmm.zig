@@ -172,6 +172,26 @@ pub fn freePages(phys: u64, order: u8) void {
     freeBlockLocked(pfn, order);
 }
 
+/// Take another reference on a user page (copy-on-write sharing).
+pub fn pageRef(phys: u64) void {
+    _ = @atomicRmw(u32, &pageOf(phys).refcount, .Add, 1, .acq_rel);
+}
+
+/// Current reference count of a page.
+pub fn pageRefs(phys: u64) u32 {
+    return @atomicLoad(u32, &pageOf(phys).refcount, .acquire);
+}
+
+/// Drop a reference; the frame is freed when the last one goes away.
+pub fn pageUnref(phys: u64) void {
+    const pg = pageOf(phys);
+    const old = @atomicRmw(u32, &pg.refcount, .Sub, 1, .acq_rel);
+    if (old == 1) {
+        pg.refcount = 1; // freePages resets it
+        freePages(phys & ~@as(u64, PAGE_SIZE - 1), 0);
+    } else if (old == 0) @panic("pageUnref: refcount underflow");
+}
+
 /// Allocate one zeroed page.
 pub fn allocPage() ?u64 {
     const p = allocPages(0) orelse return null;

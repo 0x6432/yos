@@ -33,6 +33,9 @@ pub const Vma = struct {
 
 pub const MAX_FDS = 256;
 
+/// Number of copy-on-write faults resolved (statistics).
+pub var cow_faults: u64 = 0;
+
 pub const Process = struct {
     pid: i32,
     ppid: i32 = 0,
@@ -90,6 +93,30 @@ pub const Process = struct {
         return phys;
     }
 
+    /// Resolve a write to a copy-on-write page. Returns false if `addr`
+    /// is not a COW page or memory ran out.
+    pub fn breakCow(self: *Process, addr: u64) bool {
+        const page = addr & ~(PAGE - 1);
+        const pte = self.space.walk(page, false) orelse return false;
+        if (pte.* & vmm.P == 0 or pte.* & vmm.COW == 0) return false;
+        const v = self.findVma(page) orelse return false;
+        if (v.prot & PROT_WRITE == 0) return false;
+        const old = pte.* & vmm.ADDR_MASK;
+        const flags = (pte.* & ~vmm.ADDR_MASK & ~vmm.COW) | vmm.W;
+        if (pmm.pageRefs(old) == 1) {
+            // last user of the frame: just take it back
+            pte.* = old | flags;
+        } else {
+            const new = pmm.allocPages(0) orelse return false;
+            @memcpy(pmm.ptr(*[4096]u8, new), pmm.ptr(*const [4096]u8, old));
+            pte.* = new | flags;
+            pmm.pageUnref(old);
+        }
+        cpu.invlpg(page);
+        cow_faults += 1;
+        return true;
+    }
+
     /// Remove [start,end) from the VMA list and unmap pages.
     pub fn unmapRange(self: *Process, start: u64, end: u64) !void {
         var i: usize = 0;
@@ -103,7 +130,7 @@ pub const Process = struct {
             const ce = @min(v.end, end);
             var a = cs;
             while (a < ce) : (a += PAGE) {
-                if (self.space.unmap(a)) |p| pmm.freePage(p);
+                if (self.space.unmap(a)) |p| pmm.pageUnref(p);
             }
             if (cs == v.start and ce == v.end) {
                 _ = self.vmas.orderedRemove(i);
@@ -147,7 +174,10 @@ pub const Process = struct {
             while (a < self.vmas.items[i].end) : (a += PAGE) {
                 if (self.space.walk(a, false)) |pte| {
                     if (pte.* & vmm.P != 0) {
-                        pte.* = (pte.* & vmm.ADDR_MASK) | pteFlags(prot) | vmm.P;
+                        var nf = pteFlags(prot);
+                        // shared COW frames stay read-only until written
+                        if (pte.* & vmm.COW != 0 and nf & vmm.W != 0) nf = (nf & ~vmm.W) | vmm.COW;
+                        pte.* = (pte.* & vmm.ADDR_MASK) | nf | vmm.P;
                         cpu.invlpg(a);
                     }
                 }
@@ -181,6 +211,9 @@ pub const Process = struct {
             const v = self.findVma(a) orelse return false;
             if (write and v.prot & PROT_WRITE == 0) return false;
             if (self.populate(a) == null) return false;
+            if (write) {
+                if (self.space.pteFlags(a)) |fl| if (fl & vmm.COW != 0 and !self.breakCow(a)) return false;
+            }
         }
         return true;
     }
@@ -264,6 +297,7 @@ fn onException(frame: *idt.TrapFrame) bool {
         const addr = cpu.readCr2();
         const present = frame.error_code & 1 != 0;
         const write = frame.error_code & 2 != 0;
+        if (present and write and addr < vmm.USER_TOP and p.breakCow(addr)) return true;
         if (!present and addr < vmm.USER_TOP) {
             if (p.findVma(addr)) |v| {
                 const ok_prot = if (write) v.prot & PROT_WRITE != 0 else true;

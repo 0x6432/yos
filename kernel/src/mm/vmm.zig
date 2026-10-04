@@ -14,6 +14,8 @@ pub const PCD: u64 = 1 << 4;
 pub const PS: u64 = 1 << 7;
 pub const G: u64 = 1 << 8;
 pub const NX: u64 = 1 << 63;
+/// Software bit: page is shared copy-on-write (hardware W is clear).
+pub const COW: u64 = 1 << 9;
 pub const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 pub const USER_TOP: u64 = 0x0000_8000_0000_0000;
@@ -93,7 +95,7 @@ pub const AddressSpace = struct {
         for (t) |e| {
             if (e & P == 0) continue;
             if (depth == 3) {
-                pmm.freePage(e & ADDR_MASK);
+                pmm.pageUnref(e & ADDR_MASK);
             } else {
                 freeLevel(e & ADDR_MASK, depth + 1);
             }
@@ -116,23 +118,26 @@ pub const AddressSpace = struct {
         pmm.freePage(self.pml4);
     }
 
+    /// Copy a page-table level. Leaf frames are shared copy-on-write:
+    /// both PTEs lose W and gain COW, and the frame's refcount goes up.
     fn copyLevel(src: u64, depth: u8) !u64 {
         const dst = pmm.allocPage() orelse return error.OutOfMemory;
         const s = table(src);
         const d = table(dst);
-        for (s, 0..) |e, i| {
-            if (e & P == 0) continue;
-            const np = if (depth == 3) blk: {
-                const pg = pmm.allocPages(0) orelse return error.OutOfMemory;
-                @memcpy(pmm.ptr(*[4096]u8, pg), pmm.ptr(*[4096]u8, e & ADDR_MASK));
-                break :blk pg;
-            } else try copyLevel(e & ADDR_MASK, depth + 1);
-            d[i] = np | (e & ~ADDR_MASK);
+        for (s, 0..) |*e, i| {
+            if (e.* & P == 0) continue;
+            if (depth == 3) {
+                if (e.* & W != 0) e.* = (e.* & ~W) | COW;
+                pmm.pageRef(e.* & ADDR_MASK);
+                d[i] = e.*;
+            } else {
+                d[i] = (try copyLevel(e.* & ADDR_MASK, depth + 1)) | (e.* & ~ADDR_MASK);
+            }
         }
         return dst;
     }
 
-    /// Eagerly duplicate the user half (fork).
+    /// Duplicate the user half for fork (copy-on-write).
     pub fn cloneUser(self: AddressSpace) !AddressSpace {
         const child = try createUser();
         const s = table(self.pml4);
@@ -141,6 +146,8 @@ pub const AddressSpace = struct {
             if (s[i] & P == 0) continue;
             d[i] = (try copyLevel(s[i] & ADDR_MASK, 1)) | (s[i] & ~ADDR_MASK);
         }
+        // parent PTEs were write-protected: flush if this space is live
+        if (cpu.readCr3() & ADDR_MASK == self.pml4) cpu.writeCr3(self.pml4);
         return child;
     }
 };

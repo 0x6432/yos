@@ -1002,6 +1002,7 @@ fn sysClone(f: *Frame, flags: u64, newsp: u64, ptid: u64, ctid: u64, tls: u64) i
         if (flags & CLONE_CHILD_SETTID != 0) {
             // child's copy of memory
             if (proc.byPid(@intCast(r))) |c| {
+                _ = c.breakCow(ctid);
                 if (c.space.translate(ctid)) |phys| pmm.ptr(*align(1) i32, phys).* = @intCast(r);
             }
         }

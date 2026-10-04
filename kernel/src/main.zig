@@ -118,10 +118,10 @@ export fn kmain() callconv(.c) noreturn {
         if (as.translate(0x400123) != pg + 0x123) @panic("vmm translate");
         const clone = as.cloneUser() catch @panic("clone");
         const cp = clone.translate(0x400000).?;
-        if (cp == pg or pmm.ptr(*u64, cp).* != 0xdeadbeefcafe) @panic("vmm clone");
+        if (cp != pg or pmm.pageRefs(pg) != 2 or clone.pteFlags(0x400000).? & vmm.COW == 0) @panic("vmm cow clone");
         clone.destroy();
         as.destroy();
-        log.info("vmm: address space create/map/clone/destroy ok", .{});
+        log.info("vmm: address space create/map/cow-clone/destroy ok", .{});
     }
     time.init();
     acpi.initTables();
